@@ -1,0 +1,173 @@
+#!/bin/bash
+set -e
+
+# Resolve the directory containing this script (and the Dockerfile)
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$SCRIPT_DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+
+IMAGE_NAME="coding-sandbox"
+
+show_help() {
+    cat <<'EOF'
+Usage: sandbox <command> [arguments]
+
+Commands:
+    run [PATH] [TOOL] [ARGS...]    Run a sandbox container
+                                   PATH defaults to current directory
+                                   TOOL: claude, or any command (default: zsh)
+    build                          Build/rebuild the container image
+    list                           List running sandbox containers
+    stop <NAME>                    Stop a running sandbox
+    shell <NAME>                   Attach to a running sandbox
+
+Examples:
+    sandbox run                    # Shell in current directory
+    sandbox run .                  # Same as above
+    sandbox run ~/project claude   # Claude Code in ~/project
+    sandbox run . claude --resume  # Claude Code with extra args
+    sandbox build                  # Build the image
+    sandbox list                   # Show running sandboxes
+    sandbox shell sandbox-myproj-1234  # Attach to running sandbox
+EOF
+    exit "${1:-0}"
+}
+
+cmd_build() {
+    local tz
+    tz="$(timedatectl show --property=Timezone --value 2>/dev/null || echo UTC)"
+
+    echo "Building ${IMAGE_NAME} image..."
+    podman build \
+        --build-arg "TZ=${tz}" \
+        -t "${IMAGE_NAME}" \
+        "${SCRIPT_DIR}"
+}
+
+cmd_run() {
+    local workspace="."
+    local tool=""
+    local tool_args=()
+
+    # First arg: if it's a directory, use as workspace
+    if [ $# -gt 0 ] && [ -d "$1" ]; then
+        workspace="$1"
+        shift
+    fi
+
+    # Next arg: tool name
+    if [ $# -gt 0 ]; then
+        tool="$1"
+        shift
+    fi
+
+    # Remaining args: passed to the tool
+    tool_args=("$@")
+
+    # Resolve workspace to absolute path
+    workspace="$(cd "$workspace" && pwd)"
+
+    # Build container command based on tool selection
+    local CMD=()
+    case "$tool" in
+        claude)
+            CMD=("claude" "--dangerously-skip-permissions" "${tool_args[@]}")
+            ;;
+        "")
+            CMD=("zsh")
+            ;;
+        *)
+            CMD=("$tool" "${tool_args[@]}")
+            ;;
+    esac
+
+    # Container name: sandbox-<dirname>-<pid>
+    local dirname
+    dirname="$(basename "$workspace")"
+    local name
+    name="$(echo "sandbox-${dirname}-$$" | sed 's/[^a-zA-Z0-9_.-]/_/g; s/^[._]*//')"
+
+    # Ensure .claude directory exists on host
+    mkdir -p "$HOME/.claude"
+
+    # Git worktree detection: if .git is a file, find and mount original repo
+    local worktree_mounts=()
+    local dot_git="$workspace/.git"
+
+    if [ -f "$dot_git" ]; then
+        local gitdir_line
+        gitdir_line="$(cat "$dot_git")"
+        if [[ "$gitdir_line" =~ ^gitdir:\ (.+)$ ]]; then
+            local gitdir_path="${BASH_REMATCH[1]}"
+            [[ "$gitdir_path" != /* ]] && gitdir_path="$workspace/$gitdir_path"
+            gitdir_path="$(realpath "$gitdir_path" 2>/dev/null || echo "$gitdir_path")"
+
+            if [[ "$gitdir_path" =~ ^(.+/\.git)/worktrees/ ]]; then
+                local original_repo
+                original_repo="$(dirname "${BASH_REMATCH[1]}")"
+                if [ "$original_repo" != "$workspace" ]; then
+                    worktree_mounts=(-v "$original_repo:$original_repo:Z")
+                fi
+            fi
+        fi
+    fi
+
+    # Git config mount (only if .gitconfig exists)
+    local gitconfig_mounts=()
+    if [ -f "$HOME/.gitconfig" ]; then
+        gitconfig_mounts=(
+            -v "$HOME/.gitconfig:/tmp/.gitconfig:ro,Z"
+            -e GIT_CONFIG_GLOBAL=/tmp/.gitconfig
+        )
+    fi
+
+    podman run --log-driver=none -it --rm \
+        --user="$(id -u):$(id -g)" \
+        --userns=keep-id \
+        --name="$name" \
+        -v "$workspace:$workspace:Z" \
+        -w "$workspace" \
+        -v "$HOME/.claude:$HOME/.claude:Z" \
+        "${gitconfig_mounts[@]}" \
+        -v "sandbox-cache:/cache" \
+        "${worktree_mounts[@]}" \
+        -e "CLAUDE_CONFIG_DIR=$HOME/.claude" \
+        -e CLAUDE_CODE_OAUTH_TOKEN \
+        "$IMAGE_NAME" \
+        "${CMD[@]}"
+}
+
+cmd_list() {
+    podman ps --filter "name=sandbox-" --format "table {{.Names}}\t{{.Status}}\t{{.Created}}"
+}
+
+cmd_stop() {
+    if [ -z "${1:-}" ]; then
+        echo "Usage: sandbox stop <name>" >&2
+        exit 1
+    fi
+    podman stop "$1"
+}
+
+cmd_shell() {
+    if [ -z "${1:-}" ]; then
+        echo "Usage: sandbox shell <name>" >&2
+        exit 1
+    fi
+    podman exec -it "$1" zsh
+}
+
+case "${1:-}" in
+    build)  shift; cmd_build "$@" ;;
+    run)    shift; cmd_run "$@" ;;
+    list)   cmd_list ;;
+    stop)   shift; cmd_stop "$@" ;;
+    shell)  shift; cmd_shell "$@" ;;
+    -h|--help|help) show_help ;;
+    "") show_help 1 ;;
+    *) echo "Unknown command: $1" >&2; show_help 1 ;;
+esac
