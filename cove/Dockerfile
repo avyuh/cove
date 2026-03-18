@@ -163,6 +163,10 @@ RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 # Codex (OpenAI)
 RUN npm install -g @openai/codex
 
+# Kimi Code (requires Python 3.13)
+RUN uv python install 3.13 && \
+    uv tool install --python 3.13 kimi-cli
+
 # OCaml: initialize opam and install dune build system
 RUN opam init --auto-setup --disable-sandboxing -y && \
     opam install dune -y && \

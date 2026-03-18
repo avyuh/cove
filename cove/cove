@@ -22,6 +22,7 @@ Run AI coding tools in an isolated container.
 Tools:
     cove claude                    Claude Code in current directory
     cove codex                     Codex in current directory
+    cove kimi                      Kimi Code in current directory
     cove claude ~/project          Claude Code in ~/project
     cove claude --resume           Pass extra args to tool
     cove shell                     Interactive shell
@@ -35,7 +36,7 @@ Management:
 
 Auto-passed env vars (if set on host):
     ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, CODEX_API_KEY,
-    OPENAI_API_KEY, GOOGLE_API_KEY, MISTRAL_API_KEY
+    KIMI_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, MISTRAL_API_KEY
 EOF
     exit "${1:-0}"
 }
@@ -84,6 +85,9 @@ cmd_run() {
         codex)
             CMD=("codex" "--yolo" "$@")
             ;;
+        kimi)
+            CMD=("kimi" "--yolo" "$@")
+            ;;
         shell)
             CMD=("zsh" "$@")
             ;;
@@ -99,7 +103,7 @@ cmd_run() {
     name="$(echo "cove-${dirname}-$$" | sed 's/[^a-zA-Z0-9_.-]/_/g; s/^[._]*//')"
 
     # Ensure config directories exist on host
-    mkdir -p "$HOME/.claude" "$HOME/.codex"
+    mkdir -p "$HOME/.claude" "$HOME/.codex" "$HOME/.kimi"
 
     # Git worktree detection: if .git is a file, find and mount original repo
     local worktree_mounts=()
@@ -140,6 +144,7 @@ cmd_run() {
         -w "$workspace" \
         -v "$HOME/.claude:$HOME/.claude:Z" \
         -v "$HOME/.codex:$HOME/.codex:Z" \
+        -v "$HOME/.kimi:$HOME/.kimi:Z" \
         "${gitconfig_mounts[@]}" \
         -v "cove-cache:/cache" \
         "${worktree_mounts[@]}" \
@@ -147,6 +152,7 @@ cmd_run() {
         -e ANTHROPIC_API_KEY \
         -e CLAUDE_CODE_OAUTH_TOKEN \
         -e CODEX_API_KEY \
+        -e KIMI_API_KEY \
         -e OPENAI_API_KEY \
         -e GOOGLE_API_KEY \
         -e MISTRAL_API_KEY \
