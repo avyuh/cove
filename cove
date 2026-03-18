@@ -37,6 +37,7 @@ Management:
     cove build                     Build/rebuild the container image
     cove build gpu-amd             Build a specific variant
     cove upgrade                   Pull latest and rebuild all images
+    cove test                      Smoke test the current image
     cove ps                        List running coves
     cove stop <name>               Stop a running cove
     cove exec <name>               Attach to a running cove
@@ -222,6 +223,101 @@ cmd_run() {
         "${CMD[@]}"
 }
 
+cmd_test() {
+    local fail=0
+    local pass=0
+    local variant="${COVE_IMAGE:-}"
+    local image="cove${variant:+-$variant}"
+    local run="podman run --rm --security-opt label=disable --userns=keep-id"
+
+    _pass() { pass=$((pass + 1)); printf '  \033[32m✓\033[0m %s\n' "$1"; }
+    _fail() { fail=$((fail + 1)); printf '  \033[31m✗\033[0m %s\n' "$1"; }
+    _check() {
+        if $run "$image" sh -c "$2" >/dev/null 2>&1; then
+            _pass "$1"
+        else
+            _fail "$1"
+        fi
+    }
+
+    echo "Testing ${image} image..."
+    echo ""
+
+    # Image exists
+    if podman image exists "$image"; then
+        _pass "image exists"
+    else
+        _fail "image exists"
+        echo ""
+        echo "$((pass + fail)) tests, $fail failed — image not built, run: cove build${variant:+ $variant}"
+        return 1
+    fi
+
+    # Container starts
+    _check "container starts" "true"
+
+    # Shell
+    _check "zsh" "zsh --version"
+
+    # Core tools
+    _check "git" "git --version"
+    _check "ripgrep" "rg --version"
+    _check "jq" "jq --version"
+    _check "fzf" "fzf --version"
+    _check "delta" "delta --version"
+    _check "gh" "gh --version"
+    _check "vim" "vim --version"
+
+    # Languages
+    _check "node" "node --version"
+    _check "python3" "python3 --version"
+    _check "go" "go version"
+    _check "rustc" "rustc --version"
+    _check "cargo" "cargo --version"
+    _check "uv" "uv --version"
+
+    # Default image extras
+    if [ -z "$variant" ]; then
+        _check "java" "java --version"
+        _check "dotnet" "dotnet --version"
+        _check "elixir" "elixir --version"
+        _check "opam" "opam --version"
+    fi
+
+    # AI coding tools
+    _check "claude" "claude --version"
+    _check "codex" "codex --version"
+    _check "kimi" "kimi --version"
+
+    # GPU variant extras
+    if [ "$variant" = "gpu-amd" ]; then
+        _check "ollama" "ollama --version"
+        _check "rocm-smi" "rocm-smi --version"
+    fi
+
+    # Mounts
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    echo "test" > "$tmpdir/probe"
+    if $run -v "$tmpdir:$tmpdir" "$image" cat "$tmpdir/probe" | grep -q test; then
+        _pass "workspace mount"
+    else
+        _fail "workspace mount"
+    fi
+    rm -rf "$tmpdir"
+
+    # Cache volume
+    if $run -v cove-cache:/cache "$image" sh -c "test -d /cache && touch /cache/.probe && rm /cache/.probe"; then
+        _pass "cache volume writable"
+    else
+        _fail "cache volume writable"
+    fi
+
+    echo ""
+    echo "$((pass + fail)) tests, $fail failed"
+    return $fail
+}
+
 cmd_ps() {
     podman ps --filter "name=cove-" --format "table {{.Names}}\t{{.Status}}\t{{.Created}}"
 }
@@ -246,6 +342,7 @@ cmd_exec() {
 case "${1:-}" in
     build)      shift; cmd_build "$@" ;;
     upgrade)    cmd_upgrade ;;
+    test)       cmd_test ;;
     ps)         cmd_ps ;;
     stop)       shift; cmd_stop "$@" ;;
     exec)       shift; cmd_exec "$@" ;;
