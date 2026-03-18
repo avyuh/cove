@@ -14,7 +14,7 @@ IMAGE_NAME="cove"
 
 show_help() {
     cat <<'EOF'
-Usage: cove <tool> [path] [args...]
+Usage: cove <tool> [-e VAR[=val]...] [path] [args...]
        cove <command> [args...]
 
 Run AI coding tools in an isolated container.
@@ -25,12 +25,17 @@ Tools:
     cove claude --resume           Claude Code with extra args
     cove shell                     Interactive shell in current directory
     cove shell ~/project           Interactive shell in ~/project
+    cove claude -e MY_KEY=secret   Pass extra env vars
 
 Management:
     cove build                     Build/rebuild the container image
     cove ps                        List running coves
     cove stop <name>               Stop a running cove
     cove exec <name>               Attach to a running cove
+
+Auto-passed env vars (if set on host):
+    ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN,
+    OPENAI_API_KEY, GOOGLE_API_KEY, MISTRAL_API_KEY
 EOF
     exit "${1:-0}"
 }
@@ -49,6 +54,16 @@ cmd_build() {
 cmd_run() {
     local tool="$1"
     shift
+
+    # Parse -e flags for extra environment variables
+    local extra_env=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -e) extra_env+=(-e "$2"); shift 2 ;;
+            -e*) extra_env+=(-e "${1#-e}"); shift ;;
+            *) break ;;
+        esac
+    done
 
     # Next arg: if it's a directory, use as workspace
     local workspace="."
@@ -125,7 +140,12 @@ cmd_run() {
         -v "cove-cache:/cache" \
         "${worktree_mounts[@]}" \
         -e "CLAUDE_CONFIG_DIR=$HOME/.claude" \
+        -e ANTHROPIC_API_KEY \
         -e CLAUDE_CODE_OAUTH_TOKEN \
+        -e OPENAI_API_KEY \
+        -e GOOGLE_API_KEY \
+        -e MISTRAL_API_KEY \
+        "${extra_env[@]}" \
         "$IMAGE_NAME" \
         "${CMD[@]}"
 }

@@ -10,6 +10,7 @@ cove claude ~/project          # Claude Code in specific directory
 cove claude --resume           # Pass args through to Claude
 cove shell                     # Interactive shell
 cove shell ~/project           # Shell in specific directory
+cove claude -e MY_KEY=secret   # Pass extra env vars
 ```
 
 ## Management
@@ -41,3 +42,5 @@ Node 22, Python 3 + uv, Go, Rust, Java 25 + GraalVM, .NET 9, Erlang/Elixir, OCam
 - Persistent cache volume (`cove-cache`) for npm/uv/go modules
 - Container is ephemeral (`--rm`), cache survives
 - No access to `~/.ssh`, `~/.gnupg`, or home directory
+- Auto-passes `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` if set on host
+- Extra env vars via `-e KEY=value` flag
