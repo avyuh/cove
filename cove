@@ -49,6 +49,7 @@ cmd_build() {
     echo "Building ${IMAGE_NAME} image..."
     podman build \
         --build-arg "TZ=${tz}" \
+        --build-arg "CACHE_BUST=$(date +%s)" \
         -t "${IMAGE_NAME}" \
         "${SCRIPT_DIR}"
 }
