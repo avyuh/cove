@@ -154,12 +154,11 @@ cmd_run() {
     # Ensure config directories exist on host
     mkdir -p "$HOME/.claude" "$HOME/.codex" "$HOME/.kimi"
 
-    # GPU variants: disable SELinux labeling (incompatible with --security-opt label=disable)
+    # SELinux: disable labeling for all containers (required on Bazzite where
+    # RELRO protection blocks library loading in rootless containers)
     local gpu_flags=()
-    local zopt=":Z"    # appended to -v mounts for SELinux relabeling
     if [[ "${COVE_IMAGE:-}" == gpu-* ]]; then
-        gpu_flags=(--device /dev/kfd --device /dev/dri --security-opt label=disable)
-        zopt=""
+        gpu_flags=(--device /dev/kfd --device /dev/dri)
     fi
 
     # Git worktree detection: if .git is a file, find and mount original repo
@@ -178,7 +177,7 @@ cmd_run() {
                 local original_repo
                 original_repo="$(dirname "${BASH_REMATCH[1]}")"
                 if [ "$original_repo" != "$workspace" ]; then
-                    worktree_mounts=(-v "$original_repo:$original_repo${zopt}")
+                    worktree_mounts=(-v "$original_repo:$original_repo")
                 fi
             fi
         fi
@@ -188,20 +187,21 @@ cmd_run() {
     local gitconfig_mounts=()
     if [ -f "$HOME/.gitconfig" ]; then
         gitconfig_mounts=(
-            -v "$HOME/.gitconfig:/tmp/.gitconfig:ro${zopt/:Z/,Z}"
+            -v "$HOME/.gitconfig:/tmp/.gitconfig:ro"
             -e GIT_CONFIG_GLOBAL=/tmp/.gitconfig
         )
     fi
 
     podman run --log-driver=none -it --rm \
+        --security-opt label=disable \
         --user="$(id -u):$(id -g)" \
         --userns=keep-id \
         --name="$name" \
-        -v "$workspace:$workspace${zopt}" \
+        -v "$workspace:$workspace" \
         -w "$workspace" \
-        -v "$HOME/.claude:$HOME/.claude${zopt}" \
-        -v "$HOME/.codex:$HOME/.codex${zopt}" \
-        -v "$HOME/.kimi:$HOME/.kimi${zopt}" \
+        -v "$HOME/.claude:$HOME/.claude" \
+        -v "$HOME/.codex:$HOME/.codex" \
+        -v "$HOME/.kimi:$HOME/.kimi" \
         "${gitconfig_mounts[@]}" \
         -v "cove-cache:/cache" \
         "${worktree_mounts[@]}" \
