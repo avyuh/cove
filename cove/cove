@@ -14,25 +14,23 @@ IMAGE_NAME="cove"
 
 show_help() {
     cat <<'EOF'
-Usage: cove <command> [arguments]
+Usage: cove <tool> [path] [args...]
+       cove <command> [args...]
 
-Commands:
-    run [PATH] [TOOL] [ARGS...]    Run a cove container
-                                   PATH defaults to current directory
-                                   TOOL: claude, or any command (default: zsh)
-    build                          Build/rebuild the container image
-    list                           List running cove containers
-    stop <NAME>                    Stop a running cove
-    shell <NAME>                   Attach to a running cove
+Run AI coding tools in an isolated container.
 
-Examples:
-    cove run                       # Shell in current directory
-    cove run .                     # Same as above
-    cove run ~/project claude      # Claude Code in ~/project
-    cove run . claude --resume     # Claude Code with extra args
-    cove build                     # Build the image
-    cove list                      # Show running coves
-    cove shell cove-myproj-1234    # Attach to running cove
+Tools:
+    cove claude                    Claude Code in current directory
+    cove claude ~/project          Claude Code in ~/project
+    cove claude --resume           Claude Code with extra args
+    cove shell                     Interactive shell in current directory
+    cove shell ~/project           Interactive shell in ~/project
+
+Management:
+    cove build                     Build/rebuild the container image
+    cove ps                        List running coves
+    cove stop <name>               Stop a running cove
+    cove exec <name>               Attach to a running cove
 EOF
     exit "${1:-0}"
 }
@@ -49,24 +47,15 @@ cmd_build() {
 }
 
 cmd_run() {
-    local workspace="."
-    local tool=""
-    local tool_args=()
+    local tool="$1"
+    shift
 
-    # First arg: if it's a directory, use as workspace
+    # Next arg: if it's a directory, use as workspace
+    local workspace="."
     if [ $# -gt 0 ] && [ -d "$1" ]; then
         workspace="$1"
         shift
     fi
-
-    # Next arg: tool name
-    if [ $# -gt 0 ]; then
-        tool="$1"
-        shift
-    fi
-
-    # Remaining args: passed to the tool
-    tool_args=("$@")
 
     # Resolve workspace to absolute path
     workspace="$(cd "$workspace" && pwd)"
@@ -75,13 +64,13 @@ cmd_run() {
     local CMD=()
     case "$tool" in
         claude)
-            CMD=("claude" "--dangerously-skip-permissions" "${tool_args[@]}")
+            CMD=("claude" "--dangerously-skip-permissions" "$@")
             ;;
-        "")
-            CMD=("zsh")
+        shell)
+            CMD=("zsh" "$@")
             ;;
         *)
-            CMD=("$tool" "${tool_args[@]}")
+            CMD=("$tool" "$@")
             ;;
     esac
 
@@ -141,7 +130,7 @@ cmd_run() {
         "${CMD[@]}"
 }
 
-cmd_list() {
+cmd_ps() {
     podman ps --filter "name=cove-" --format "table {{.Names}}\t{{.Status}}\t{{.Created}}"
 }
 
@@ -153,21 +142,22 @@ cmd_stop() {
     podman stop "$1"
 }
 
-cmd_shell() {
+cmd_exec() {
     if [ -z "${1:-}" ]; then
-        echo "Usage: cove shell <name>" >&2
+        echo "Usage: cove exec <name>" >&2
         exit 1
     fi
     podman exec -it "$1" zsh
 }
 
+# Reserved management commands
 case "${1:-}" in
-    build)  shift; cmd_build "$@" ;;
-    run)    shift; cmd_run "$@" ;;
-    list)   cmd_list ;;
-    stop)   shift; cmd_stop "$@" ;;
-    shell)  shift; cmd_shell "$@" ;;
+    build)      shift; cmd_build "$@" ;;
+    ps)         cmd_ps ;;
+    stop)       shift; cmd_stop "$@" ;;
+    exec)       shift; cmd_exec "$@" ;;
     -h|--help|help) show_help ;;
-    "") show_help 1 ;;
-    *) echo "Unknown command: $1" >&2; show_help 1 ;;
+    "")         show_help 1 ;;
+    # Everything else: treat as a tool name → run it
+    *)          cmd_run "$@" ;;
 esac
