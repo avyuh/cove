@@ -95,7 +95,6 @@ RUN mkdir -p /cache/npm /cache/uv /cache/go-mod /cache/cargo /cache/ollama /cach
 ENV NPM_CONFIG_CACHE=/cache/npm
 ENV UV_CACHE_DIR=/cache/uv
 ENV GOMODCACHE=/cache/go-mod
-ENV CARGO_HOME=/cache/cargo
 ENV OLLAMA_MODELS=/cache/ollama
 ENV HF_HOME=/cache/huggingface
 ENV TORCH_HOME=/cache/torch

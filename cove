@@ -205,6 +205,7 @@ cmd_run() {
         -v "cove-cache:/cache" \
         "${worktree_mounts[@]}" \
         -e "HOME=$HOME" \
+        -e "CARGO_HOME=/cache/cargo" \
         -e "CLAUDE_CONFIG_DIR=$HOME/.claude" \
         -e ANTHROPIC_API_KEY \
         -e CLAUDE_CODE_OAUTH_TOKEN \
