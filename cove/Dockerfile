@@ -160,6 +160,9 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 # Claude Code
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}
 
+# Codex (OpenAI)
+RUN npm install -g @openai/codex
+
 # OCaml: initialize opam and install dune build system
 RUN opam init --auto-setup --disable-sandboxing -y && \
     opam install dune -y && \
