@@ -36,6 +36,7 @@ Variants (via COVE_IMAGE env var):
 Management:
     cove build                     Build/rebuild the container image
     cove build gpu-amd             Build a specific variant
+    cove upgrade                   Pull latest and rebuild all images
     cove ps                        List running coves
     cove stop <name>               Stop a running cove
     cove exec <name>               Attach to a running cove
@@ -72,6 +73,21 @@ cmd_build() {
         -f "${SCRIPT_DIR}/${dockerfile}" \
         -t "${tag}" \
         "${SCRIPT_DIR}"
+}
+
+cmd_upgrade() {
+    echo "Pulling latest..."
+    git -C "$SCRIPT_DIR" pull --ff-only
+
+    cmd_build
+
+    for df in "$SCRIPT_DIR"/Dockerfile.*; do
+        [ -f "$df" ] || continue
+        variant="${df##*.}"
+        if podman image exists "cove-${variant}"; then
+            cmd_build "$variant"
+        fi
+    done
 }
 
 cmd_run() {
@@ -216,6 +232,7 @@ cmd_exec() {
 # Reserved management commands
 case "${1:-}" in
     build)      shift; cmd_build "$@" ;;
+    upgrade)    cmd_upgrade ;;
     ps)         cmd_ps ;;
     stop)       shift; cmd_stop "$@" ;;
     exec)       shift; cmd_exec "$@" ;;
