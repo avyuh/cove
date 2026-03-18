@@ -194,6 +194,7 @@ cmd_run() {
         "${gitconfig_mounts[@]}" \
         -v "cove-cache:/cache" \
         "${worktree_mounts[@]}" \
+        -e "HOME=$HOME" \
         -e "CLAUDE_CONFIG_DIR=$HOME/.claude" \
         -e ANTHROPIC_API_KEY \
         -e CLAUDE_CODE_OAUTH_TOKEN \
