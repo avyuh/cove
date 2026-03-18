@@ -68,6 +68,7 @@ cmd_build() {
 
     echo "Building ${tag} image..."
     podman build \
+        --security-opt label=disable \
         --build-arg "TZ=${tz}" \
         --build-arg "CACHE_BUST=$(date +%s)" \
         -f "${SCRIPT_DIR}/${dockerfile}" \
