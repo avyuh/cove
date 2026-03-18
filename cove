@@ -114,6 +114,16 @@ cmd_run() {
     # Resolve workspace to absolute path
     workspace="$(cd "$workspace" && pwd)"
 
+    # Refuse to mount home directory (SELinux won't allow relabeling it,
+    # and it exposes far more than intended)
+    local real_home
+    real_home="$(cd "$HOME" && pwd -P)"
+    if [ "$workspace" = "$HOME" ] || [ "$workspace" = "$real_home" ]; then
+        echo "Error: refusing to mount home directory as workspace." >&2
+        echo "Run from a project directory, or specify one: cove $tool ~/project" >&2
+        exit 1
+    fi
+
     # Build container command based on tool selection
     local CMD=()
     case "$tool" in
