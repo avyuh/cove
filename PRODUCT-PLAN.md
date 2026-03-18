@@ -48,18 +48,15 @@ After evaluating 8 approaches (plain Podman, Distrobox, Toolbx, Dev Containers, 
 - Easy to start — one command
 
 **Like to have:**
-- Persistent cache volume (avoid reinstalling deps every session)
+- Persistent cache volume (avoid reinstalling deps every session) — **done**
 
-**Don't care about (for now):**
-- Network restrictions / iptables lockdown
-- GPU passthrough (but design for easy addition later — `--amd-gpu` flag)
-- Session sync between container and host
-- Supply chain protections
-
-**Future:**
+**Ideas:**
+- `cove update` — rebuild with latest tool versions (`--no-cache`)
+- Multiple workspace mounts (`-v` passthrough)
+- Per-project config file (`.cove`)
 - `--amd-gpu` flag for AMD ROCm GPU passthrough (`--device /dev/kfd --device /dev/dri`)
-- Useful for local LLM / GPU projects
-- Per-project config file support
+- Network restrictions / iptables lockdown
+- Supply chain protections
 
 ### Architecture
 
