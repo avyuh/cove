@@ -10,29 +10,29 @@ while [ -L "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 
-IMAGE_NAME="coding-sandbox"
+IMAGE_NAME="cove"
 
 show_help() {
     cat <<'EOF'
-Usage: sandbox <command> [arguments]
+Usage: cove <command> [arguments]
 
 Commands:
-    run [PATH] [TOOL] [ARGS...]    Run a sandbox container
+    run [PATH] [TOOL] [ARGS...]    Run a cove container
                                    PATH defaults to current directory
                                    TOOL: claude, or any command (default: zsh)
     build                          Build/rebuild the container image
-    list                           List running sandbox containers
-    stop <NAME>                    Stop a running sandbox
-    shell <NAME>                   Attach to a running sandbox
+    list                           List running cove containers
+    stop <NAME>                    Stop a running cove
+    shell <NAME>                   Attach to a running cove
 
 Examples:
-    sandbox run                    # Shell in current directory
-    sandbox run .                  # Same as above
-    sandbox run ~/project claude   # Claude Code in ~/project
-    sandbox run . claude --resume  # Claude Code with extra args
-    sandbox build                  # Build the image
-    sandbox list                   # Show running sandboxes
-    sandbox shell sandbox-myproj-1234  # Attach to running sandbox
+    cove run                       # Shell in current directory
+    cove run .                     # Same as above
+    cove run ~/project claude      # Claude Code in ~/project
+    cove run . claude --resume     # Claude Code with extra args
+    cove build                     # Build the image
+    cove list                      # Show running coves
+    cove shell cove-myproj-1234    # Attach to running cove
 EOF
     exit "${1:-0}"
 }
@@ -85,11 +85,11 @@ cmd_run() {
             ;;
     esac
 
-    # Container name: sandbox-<dirname>-<pid>
+    # Container name: cove-<dirname>-<pid>
     local dirname
     dirname="$(basename "$workspace")"
     local name
-    name="$(echo "sandbox-${dirname}-$$" | sed 's/[^a-zA-Z0-9_.-]/_/g; s/^[._]*//')"
+    name="$(echo "cove-${dirname}-$$" | sed 's/[^a-zA-Z0-9_.-]/_/g; s/^[._]*//')"
 
     # Ensure .claude directory exists on host
     mkdir -p "$HOME/.claude"
@@ -133,7 +133,7 @@ cmd_run() {
         -w "$workspace" \
         -v "$HOME/.claude:$HOME/.claude:Z" \
         "${gitconfig_mounts[@]}" \
-        -v "sandbox-cache:/cache" \
+        -v "cove-cache:/cache" \
         "${worktree_mounts[@]}" \
         -e "CLAUDE_CONFIG_DIR=$HOME/.claude" \
         -e CLAUDE_CODE_OAUTH_TOKEN \
@@ -142,12 +142,12 @@ cmd_run() {
 }
 
 cmd_list() {
-    podman ps --filter "name=sandbox-" --format "table {{.Names}}\t{{.Status}}\t{{.Created}}"
+    podman ps --filter "name=cove-" --format "table {{.Names}}\t{{.Status}}\t{{.Created}}"
 }
 
 cmd_stop() {
     if [ -z "${1:-}" ]; then
-        echo "Usage: sandbox stop <name>" >&2
+        echo "Usage: cove stop <name>" >&2
         exit 1
     fi
     podman stop "$1"
@@ -155,7 +155,7 @@ cmd_stop() {
 
 cmd_shell() {
     if [ -z "${1:-}" ]; then
-        echo "Usage: sandbox shell <name>" >&2
+        echo "Usage: cove shell <name>" >&2
         exit 1
     fi
     podman exec -it "$1" zsh
