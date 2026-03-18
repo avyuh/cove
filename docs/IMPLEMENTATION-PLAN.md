@@ -2,7 +2,7 @@
 
 ## Context
 
-Cove is an isolated Podman container for running AI coding tools with full autonomy — install anything, modify anything, run anything — without risk to the host system. Built on patterns from con/yolo and trailofbits/claude-code-devcontainer, adapted for rootless Podman + SELinux on Bazzite.
+Cove is an isolated Podman container for running AI coding tools with full autonomy — install anything, modify anything, run anything — with limited blast radius on the host. Built on patterns from con/yolo and trailofbits/claude-code-devcontainer, adapted for rootless Podman + SELinux on Bazzite.
 
 See [PRODUCT-PLAN.md](PRODUCT-PLAN.md) for design rationale and product decisions.
 

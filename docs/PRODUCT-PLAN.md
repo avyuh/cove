@@ -2,7 +2,7 @@
 
 ## Goal
 
-Run AI coding tools (Claude Code, Codex, Kimi Code, etc.) in an isolated Podman container on Bazzite where they have full autonomy — install anything, modify anything, run anything — without risk to the host system.
+Run AI coding tools (Claude Code, Codex, Kimi Code, etc.) in an isolated Podman container on Bazzite where they have full autonomy — install anything, modify anything, run anything — with limited blast radius on the host.
 
 ## Name
 
