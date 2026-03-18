@@ -10,7 +10,8 @@ while [ -L "$SOURCE" ]; do
 done
 SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 
-IMAGE_NAME="cove"
+# Image selection: COVE_IMAGE=gpu-amd → cove-gpu-amd, unset → cove
+IMAGE_NAME="cove${COVE_IMAGE:+-$COVE_IMAGE}"
 
 show_help() {
     cat <<'EOF'
@@ -28,8 +29,13 @@ Tools:
     cove shell                     Interactive shell
     cove claude -e MY_KEY=secret   Pass extra env vars
 
+Variants (via COVE_IMAGE env var):
+    COVE_IMAGE=gpu-amd cove claude   Use GPU-enabled image (AMD ROCm)
+    export COVE_IMAGE=gpu-amd        Set once in shell profile
+
 Management:
     cove build                     Build/rebuild the container image
+    cove build gpu-amd             Build a specific variant
     cove ps                        List running coves
     cove stop <name>               Stop a running cove
     cove exec <name>               Attach to a running cove
@@ -43,14 +49,28 @@ EOF
 }
 
 cmd_build() {
+    local variant="${1:-}"
+    local dockerfile="Dockerfile"
+    local tag="cove"
+
+    if [ -n "$variant" ]; then
+        dockerfile="Dockerfile.${variant}"
+        tag="cove-${variant}"
+        if [ ! -f "${SCRIPT_DIR}/${dockerfile}" ]; then
+            echo "Unknown variant: ${variant} (no ${dockerfile} found)" >&2
+            exit 1
+        fi
+    fi
+
     local tz
     tz="$(timedatectl show --property=Timezone --value 2>/dev/null || echo UTC)"
 
-    echo "Building ${IMAGE_NAME} image..."
+    echo "Building ${tag} image..."
     podman build \
         --build-arg "TZ=${tz}" \
         --build-arg "CACHE_BUST=$(date +%s)" \
-        -t "${IMAGE_NAME}" \
+        -f "${SCRIPT_DIR}/${dockerfile}" \
+        -t "${tag}" \
         "${SCRIPT_DIR}"
 }
 
@@ -138,6 +158,12 @@ cmd_run() {
         )
     fi
 
+    # GPU device passthrough for gpu-* variants
+    local gpu_flags=()
+    if [[ "${COVE_IMAGE:-}" == gpu-* ]]; then
+        gpu_flags=(--device /dev/kfd --device /dev/dri --security-opt label=disable)
+    fi
+
     podman run --log-driver=none -it --rm \
         --user="$(id -u):$(id -g)" \
         --userns=keep-id \
@@ -159,6 +185,7 @@ cmd_run() {
         -e OPENROUTER_API_KEY \
         -e GOOGLE_API_KEY \
         -e MISTRAL_API_KEY \
+        "${gpu_flags[@]}" \
         "${extra_env[@]}" \
         "$IMAGE_NAME" \
         "${CMD[@]}"

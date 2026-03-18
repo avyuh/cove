@@ -22,10 +22,21 @@ cove shell                     # Interactive shell (no AI tool)
 cove claude -e MY_KEY=secret   # Pass extra env vars
 ```
 
+## GPU support
+
+```bash
+cove build gpu-amd                   # Build the AMD GPU variant
+COVE_IMAGE=gpu-amd cove claude       # Run with GPU access
+export COVE_IMAGE=gpu-amd            # Or set once in shell profile
+```
+
+Requires AMD GPU with ROCm support. Device passthrough (`/dev/kfd`, `/dev/dri`) is automatic. The GPU image includes ROCm 7.1.1, ollama, and GPU-relevant dev tools. Default image is unaffected — GPU base is only pulled when you build it.
+
 ## Management
 
 ```bash
 cove build                     # Build/rebuild container image
+cove build gpu-amd             # Build a specific variant
 cove ps                        # List running coves
 cove stop <name>               # Stop a cove
 cove exec <name>               # Attach to running cove
