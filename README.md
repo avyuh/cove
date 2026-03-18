@@ -34,6 +34,12 @@ cove exec <name>               # Attach to running cove
 ## Install
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/avyuh/cove/master/install.sh | bash
+```
+
+Or manually:
+
+```bash
 git clone <repo> && cd cove
 ./cove build
 ln -sf "$(pwd)/cove" ~/.local/bin/cove
