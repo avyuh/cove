@@ -147,7 +147,8 @@ cmd_run() {
     local gpu_flags=()
     local zopt=":Z"    # appended to -v mounts for SELinux relabeling
     if [[ "${COVE_IMAGE:-}" == gpu-* ]]; then
-        gpu_flags=(--device /dev/kfd --device /dev/dri --security-opt label=disable)
+        gpu_flags=(--device /dev/kfd --device /dev/dri --security-opt label=disable
+                   -v "cove-ollama:/usr/share/ollama/.ollama")
         zopt=""
     fi
 
