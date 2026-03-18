@@ -1,6 +1,6 @@
 # cove
 
-Isolated Podman container for running AI coding tools with full autonomy — no risk to host.
+Rootless Podman container for running AI coding tools in fully autonomous mode.
 
 ## Supported tools
 
@@ -8,7 +8,7 @@ Isolated Podman container for running AI coding tools with full autonomy — no 
 - **Codex** (`cove codex`) — runs with `--yolo`
 - **Kimi Code** (`cove kimi`) — runs with `--yolo`
 
-All tools launch in fully autonomous mode by default. The container is the sandbox — tools get unrestricted access inside it while your host stays untouched.
+All tools launch in fully autonomous mode by default. The container limits blast radius — tools can only access the mounted workspace and config directories, not the rest of your host.
 
 ## Usage
 
@@ -37,6 +37,7 @@ Requires AMD GPU with ROCm support. Device passthrough (`/dev/kfd`, `/dev/dri`) 
 ```bash
 cove build                     # Build/rebuild container image
 cove build gpu-amd             # Build a specific variant
+cove upgrade                   # Pull latest and rebuild all images
 cove ps                        # List running coves
 cove stop <name>               # Stop a cove
 cove exec <name>               # Attach to running cove
@@ -56,18 +57,28 @@ git clone <repo> && cd cove
 ln -sf "$(pwd)/cove" ~/.local/bin/cove
 ```
 
+Requires: `git`, `podman` (rootless).
+
 ## What's inside
 
 Node 22, Python 3 + uv, Go, Rust, Java 25 + GraalVM, .NET 9, Erlang/Elixir, OCaml, Claude Code, Codex, Kimi Code, gh, ripgrep, fzf, jq, git-delta, vim, zsh.
 
-## How it works
+## Trust boundary
 
-- Rootless Podman, `--userns=keep-id`, SELinux `:Z` labels
-- Workspace mounted at real host path (session compatible)
-- `~/.claude`, `~/.codex`, `~/.kimi` mounted for auth/config
-- `~/.gitconfig` read-only for git identity
-- Persistent cache volume (`cove-cache`) for npm/uv/go modules
-- Container is ephemeral (`--rm`), cache survives
-- No access to `~/.ssh`, `~/.gnupg`, or home directory
-- Auto-passes `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_API_KEY`, `KIMI_API_KEY` if set on host
-- Extra env vars via `-e KEY=value` flag
+The container is **not** a security sandbox. It limits blast radius, not access.
+
+**What tools CAN access:**
+- Workspace directory (read-write)
+- `~/.claude`, `~/.codex`, `~/.kimi` (auth/config, read-write)
+- `~/.gitconfig` (read-only)
+- API keys passed via environment
+- Full network access
+- Git worktree parent repo (if workspace is a worktree)
+
+**What tools CANNOT access:**
+- Home directory (beyond the above)
+- `~/.ssh`, `~/.gnupg`, host credentials
+- Other projects outside the mounted workspace
+- Host system files, other containers
+
+**npm scripts** are disabled by default (`NPM_CONFIG_IGNORE_SCRIPTS=true`) as a supply chain hardening measure. Override per-install with `npm install --ignore-scripts=false` when a package needs postinstall scripts.

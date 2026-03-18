@@ -105,7 +105,7 @@ RUN mkdir -p /usr/local/share/npm-global && \
     chown -R node:node /usr/local/share/npm-global
 
 # Persistent cache directories (volume-mounted at runtime)
-RUN mkdir -p /cache/npm /cache/uv /cache/go-mod && \
+RUN mkdir -p /cache/npm /cache/uv /cache/go-mod /cache/cargo && \
     chown -R node:node /cache
 
 # ============================================================
@@ -120,6 +120,7 @@ ENV GRAALVM_HOME=/usr/local/java/graalvm
 ENV NPM_CONFIG_CACHE=/cache/npm
 ENV UV_CACHE_DIR=/cache/uv
 ENV GOMODCACHE=/cache/go-mod
+ENV CARGO_HOME=/cache/cargo
 
 # npm supply chain hardening (from Trail of Bits)
 ENV NPM_CONFIG_IGNORE_SCRIPTS=true
