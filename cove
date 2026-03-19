@@ -203,6 +203,7 @@ cmd_run() {
         -v "$HOME/.claude:$HOME/.claude" \
         -v "$HOME/.codex:$HOME/.codex" \
         -v "$HOME/.kimi:$HOME/.kimi" \
+        -v "$HOME/.config/gh:$HOME/.config/gh:ro" \
         "${gitconfig_mounts[@]}" \
         -v "cove-cache:/cache" \
         "${worktree_mounts[@]}" \
