@@ -208,6 +208,11 @@ cmd_run() {
         -v "cove-cache:/cache" \
         "${worktree_mounts[@]}" \
         -e "HOME=$HOME" \
+        -e GIT_CONFIG_COUNT=2 \
+        -e GIT_CONFIG_KEY_0=credential.helper \
+        -e "GIT_CONFIG_VALUE_0=!/usr/bin/gh auth git-credential" \
+        -e GIT_CONFIG_KEY_1="url.https://github.com/.insteadOf" \
+        -e "GIT_CONFIG_VALUE_1=git@github.com:" \
         -e "CARGO_HOME=/cache/cargo" \
         -e "CLAUDE_CONFIG_DIR=$HOME/.claude" \
         -e ANTHROPIC_API_KEY \
