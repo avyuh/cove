@@ -184,11 +184,29 @@ cmd_run() {
         fi
     fi
 
-    # Git config mount (only if .gitconfig exists)
+    # Git config: include user's .gitconfig but override credential helpers
+    # so git authenticates via gh inside the container (where host gh paths
+    # don't exist). The empty helper = line clears inherited helpers before
+    # setting the container-correct one.
     local gitconfig_mounts=()
+    local gitconfig_wrapper=""
     if [ -f "$HOME/.gitconfig" ]; then
+        gitconfig_wrapper="$(mktemp)"
+        cat > "$gitconfig_wrapper" <<'GITCFG'
+[include]
+    path = /tmp/.gitconfig.host
+[credential "https://github.com"]
+    helper =
+    helper = !/usr/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+    helper =
+    helper = !/usr/bin/gh auth git-credential
+[url "https://github.com/"]
+    insteadOf = git@github.com:
+GITCFG
         gitconfig_mounts=(
-            -v "$HOME/.gitconfig:/tmp/.gitconfig:ro"
+            -v "$HOME/.gitconfig:/tmp/.gitconfig.host:ro"
+            -v "$gitconfig_wrapper:/tmp/.gitconfig:ro"
             -e GIT_CONFIG_GLOBAL=/tmp/.gitconfig
         )
     fi
@@ -208,11 +226,6 @@ cmd_run() {
         -v "cove-cache:/cache" \
         "${worktree_mounts[@]}" \
         -e "HOME=$HOME" \
-        -e GIT_CONFIG_COUNT=2 \
-        -e GIT_CONFIG_KEY_0=credential.helper \
-        -e "GIT_CONFIG_VALUE_0=!/usr/bin/gh auth git-credential" \
-        -e GIT_CONFIG_KEY_1="url.https://github.com/.insteadOf" \
-        -e "GIT_CONFIG_VALUE_1=git@github.com:" \
         -e "CARGO_HOME=/cache/cargo" \
         -e "CLAUDE_CONFIG_DIR=$HOME/.claude" \
         -e ANTHROPIC_API_KEY \
@@ -227,6 +240,9 @@ cmd_run() {
         "${extra_env[@]}" \
         "$IMAGE_NAME" \
         "${CMD[@]}"
+
+    # Clean up tempfile
+    [ -n "$gitconfig_wrapper" ] && rm -f "$gitconfig_wrapper"
 }
 
 cmd_test() {
