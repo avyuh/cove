@@ -5,7 +5,7 @@ FROM node:22
 # ============================================================
 ARG TZ
 ARG CLAUDE_CODE_VERSION=latest
-ARG GIT_DELTA_VERSION=0.19.1
+ARG GIT_DELTA_VERSION=0.18.2
 ARG EXTRA_PACKAGES=""
 
 ENV TZ="${TZ}"
