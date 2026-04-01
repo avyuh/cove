@@ -1,11 +1,11 @@
-FROM docker.io/rocm/dev-ubuntu-24.04:7.1.1-complete
+FROM docker.io/rocm/pytorch:rocm7.2.1_ubuntu24.04_py3.12_pytorch_release_2.10.0
 
 # ============================================================
 # Build arguments
 # ============================================================
 ARG TZ
 ARG CLAUDE_CODE_VERSION=latest
-ARG GIT_DELTA_VERSION=0.18.2
+ARG GIT_DELTA_VERSION=0.19.1
 ARG EXTRA_PACKAGES=""
 
 ENV TZ="${TZ}"
@@ -66,6 +66,13 @@ RUN ARCH="$(dpkg --print-architecture)" && \
     GO_DL="$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -1)" && \
     curl -fsSL "https://go.dev/dl/${GO_DL}.linux-${ARCH}.tar.gz" -o /tmp/go.tar.gz && \
     tar -C /usr/local -xzf /tmp/go.tar.gz && rm /tmp/go.tar.gz
+
+# ML ecosystem (PyTorch is already in the base image)
+RUN pip install --no-cache-dir \
+    transformers datasets accelerate tokenizers \
+    peft trl \
+    scipy scikit-learn \
+    safetensors huggingface-hub
 
 # Ollama (pre-installed for local inference)
 RUN curl -fsSL https://ollama.com/install.sh | sh

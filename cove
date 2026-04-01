@@ -11,7 +11,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 
 # Image selection: COVE_IMAGE=gpu-amd → cove-gpu-amd, unset → cove
-IMAGE_NAME="cove${COVE_IMAGE:+-$COVE_IMAGE}"
+IMAGE_NAME="localhost/cove${COVE_IMAGE:+-$COVE_IMAGE}"
 
 show_help() {
     cat <<'EOF'
@@ -53,11 +53,11 @@ EOF
 cmd_build() {
     local variant="${1:-}"
     local dockerfile="Dockerfile"
-    local tag="cove"
+    local tag="localhost/cove"
 
     if [ -n "$variant" ]; then
         dockerfile="Dockerfile.${variant}"
-        tag="cove-${variant}"
+        tag="localhost/cove-${variant}"
         if [ ! -f "${SCRIPT_DIR}/${dockerfile}" ]; then
             echo "Unknown variant: ${variant} (no ${dockerfile} found)" >&2
             exit 1
@@ -86,7 +86,7 @@ cmd_upgrade() {
     for df in "$SCRIPT_DIR"/Dockerfile.*; do
         [ -f "$df" ] || continue
         variant="${df##*.}"
-        if podman image exists "cove-${variant}"; then
+        if podman image exists "localhost/cove-${variant}"; then
             cmd_build "$variant"
         fi
     done
@@ -211,6 +211,12 @@ GITCFG
         )
     fi
 
+    if ! podman image exists "$IMAGE_NAME"; then
+        echo "Error: image '$IMAGE_NAME' not found." >&2
+        echo "Build it first: cove build${COVE_IMAGE:+ $COVE_IMAGE}" >&2
+        exit 1
+    fi
+
     podman run --log-driver=none -it --rm \
         --security-opt label=disable \
         --user="$(id -u):$(id -g)" \
@@ -249,7 +255,7 @@ cmd_test() {
     local fail=0
     local pass=0
     local variant="${COVE_IMAGE:-}"
-    local image="cove${variant:+-$variant}"
+    local image="localhost/cove${variant:+-$variant}"
     local run="podman run --rm --security-opt label=disable --userns=keep-id"
 
     _pass() { pass=$((pass + 1)); printf '  \033[32m✓\033[0m %s\n' "$1"; }
@@ -315,6 +321,8 @@ cmd_test() {
     if [ "$variant" = "gpu-amd" ]; then
         _check "ollama" "ollama --version"
         _check "rocm-smi" "rocm-smi --version"
+        _check "pytorch" "python3 -c 'import torch; print(torch.__version__)'"
+        _check "transformers" "python3 -c 'import transformers; print(transformers.__version__)'"
     fi
 
     # Mounts
