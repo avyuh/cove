@@ -170,6 +170,9 @@ RUN npm install -g @openai/codex
 RUN uv python install 3.13 && \
     uv tool install --python 3.13 kimi-cli
 
+# Modal
+RUN uv tool install modal
+
 # OCaml: initialize opam and install dune build system
 RUN opam init --auto-setup --disable-sandboxing -y && \
     opam install dune -y && \

@@ -45,7 +45,8 @@ Management:
 Auto-passed env vars (if set on host):
     ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, CODEX_API_KEY,
     KIMI_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
-    GOOGLE_API_KEY, MISTRAL_API_KEY
+    GOOGLE_API_KEY, MISTRAL_API_KEY, MODAL_TOKEN_ID,
+    MODAL_TOKEN_SECRET
 EOF
     exit "${1:-0}"
 }
@@ -211,6 +212,10 @@ GITCFG
         )
     fi
 
+    # Modal config (mount if exists)
+    local modal_mount=""
+    [ -f "$HOME/.modal.toml" ] && modal_mount="$HOME/.modal.toml:$HOME/.modal.toml:ro"
+
     if ! podman image exists "$IMAGE_NAME"; then
         echo "Error: image '$IMAGE_NAME' not found." >&2
         echo "Build it first: cove build${COVE_IMAGE:+ $COVE_IMAGE}" >&2
@@ -228,6 +233,7 @@ GITCFG
         -v "$HOME/.codex:$HOME/.codex" \
         -v "$HOME/.kimi:$HOME/.kimi" \
         -v "$HOME/.config/gh:$HOME/.config/gh:ro" \
+        ${modal_mount:+-v "$modal_mount"} \
         "${gitconfig_mounts[@]}" \
         -v "cove-cache:/cache" \
         "${worktree_mounts[@]}" \
@@ -242,6 +248,8 @@ GITCFG
         -e OPENROUTER_API_KEY \
         -e GOOGLE_API_KEY \
         -e MISTRAL_API_KEY \
+        -e MODAL_TOKEN_ID \
+        -e MODAL_TOKEN_SECRET \
         "${gpu_flags[@]}" \
         "${extra_env[@]}" \
         "$IMAGE_NAME" \
@@ -316,6 +324,7 @@ cmd_test() {
     _check "claude" "claude --version"
     _check "codex" "codex --version"
     _check "kimi" "kimi --version"
+    _check "modal" "modal --version"
 
     # GPU variant extras
     if [ "$variant" = "gpu-amd" ]; then
