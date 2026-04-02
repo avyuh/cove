@@ -156,6 +156,10 @@ cmd_run() {
     # Ensure config directories exist on host
     mkdir -p "$HOME/.claude" "$HOME/.codex" "$HOME/.kimi"
 
+    # Use the image user's home inside the container so login shells and tools
+    # resolve config and PATH consistently with where the image installs them.
+    local container_home="/home/node"
+
     # SELinux: disable labeling for all containers (required on Bazzite where
     # RELRO protection blocks library loading in rootless containers)
     local gpu_flags=()
@@ -214,7 +218,7 @@ GITCFG
 
     # Modal config (mount if exists)
     local modal_mount=""
-    [ -f "$HOME/.modal.toml" ] && modal_mount="$HOME/.modal.toml:$HOME/.modal.toml:ro"
+    [ -f "$HOME/.modal.toml" ] && modal_mount="$HOME/.modal.toml:$container_home/.modal.toml:ro"
 
     if ! podman image exists "$IMAGE_NAME"; then
         echo "Error: image '$IMAGE_NAME' not found." >&2
@@ -229,17 +233,17 @@ GITCFG
         --name="$name" \
         -v "$workspace:$workspace" \
         -w "$workspace" \
-        -v "$HOME/.claude:$HOME/.claude" \
-        -v "$HOME/.codex:$HOME/.codex" \
-        -v "$HOME/.kimi:$HOME/.kimi" \
-        -v "$HOME/.config/gh:$HOME/.config/gh:ro" \
+        -v "$HOME/.claude:$container_home/.claude" \
+        -v "$HOME/.codex:$container_home/.codex" \
+        -v "$HOME/.kimi:$container_home/.kimi" \
+        -v "$HOME/.config/gh:$container_home/.config/gh:ro" \
         ${modal_mount:+-v "$modal_mount"} \
         "${gitconfig_mounts[@]}" \
         -v "cove-cache:/cache" \
         "${worktree_mounts[@]}" \
-        -e "HOME=$HOME" \
+        -e "HOME=$container_home" \
         -e "CARGO_HOME=/cache/cargo" \
-        -e "CLAUDE_CONFIG_DIR=$HOME/.claude" \
+        -e "CLAUDE_CONFIG_DIR=$container_home/.claude" \
         -e ANTHROPIC_API_KEY \
         -e CLAUDE_CODE_OAUTH_TOKEN \
         -e CODEX_API_KEY \
