@@ -82,7 +82,10 @@ RUN curl -fsSL https://ollama.com/install.sh | sh
 # ============================================================
 
 # Create non-root user with passwordless sudo
-RUN useradd -m -s /bin/zsh -G video,render node && \
+# The rocm/pytorch base image ships an 'ubuntu' user at UID 1000;
+# remove it so 'node' gets UID 1000 (matching --userns=keep-id on most hosts).
+RUN userdel -r ubuntu 2>/dev/null || true && \
+    useradd -m -u 1000 -s /bin/zsh -G video,render node && \
     echo "node ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/node && \
     chmod 0440 /etc/sudoers.d/node
 
