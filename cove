@@ -46,7 +46,7 @@ Auto-passed env vars (if set on host):
     ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, CODEX_API_KEY,
     KIMI_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
     GOOGLE_API_KEY, MISTRAL_API_KEY, MODAL_TOKEN_ID,
-    MODAL_TOKEN_SECRET
+    MODAL_TOKEN_SECRET, RUNPOD_API_KEY, VAST_API_KEY
 EOF
     exit "${1:-0}"
 }
@@ -220,6 +220,14 @@ GITCFG
     local modal_mount=""
     [ -f "$HOME/.modal.toml" ] && modal_mount="$HOME/.modal.toml:$container_home/.modal.toml:ro"
 
+    # RunPod config (mount if exists)
+    local runpod_mount=""
+    [ -d "$HOME/.runpod" ] && runpod_mount="$HOME/.runpod:$container_home/.runpod:ro"
+
+    # Vast.ai config (mount if exists)
+    local vastai_mount=""
+    [ -d "$HOME/.config/vastai" ] && vastai_mount="$HOME/.config/vastai:$container_home/.config/vastai:ro"
+
     if ! podman image exists "$IMAGE_NAME"; then
         echo "Error: image '$IMAGE_NAME' not found." >&2
         echo "Build it first: cove build${COVE_IMAGE:+ $COVE_IMAGE}" >&2
@@ -238,6 +246,8 @@ GITCFG
         -v "$HOME/.kimi:$container_home/.kimi" \
         -v "$HOME/.config/gh:$container_home/.config/gh:ro" \
         ${modal_mount:+-v "$modal_mount"} \
+        ${runpod_mount:+-v "$runpod_mount"} \
+        ${vastai_mount:+-v "$vastai_mount"} \
         "${gitconfig_mounts[@]}" \
         -v "cove-cache:/cache" \
         "${worktree_mounts[@]}" \
@@ -254,6 +264,8 @@ GITCFG
         -e MISTRAL_API_KEY \
         -e MODAL_TOKEN_ID \
         -e MODAL_TOKEN_SECRET \
+        -e RUNPOD_API_KEY \
+        -e VAST_API_KEY \
         "${gpu_flags[@]}" \
         "${extra_env[@]}" \
         "$IMAGE_NAME" \

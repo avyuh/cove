@@ -173,6 +173,10 @@ RUN uv python install 3.13 && \
 # Modal
 RUN uv tool install modal
 
+# RunPod & Vast.ai CLIs
+RUN uv tool install runpod && \
+    uv tool install vastai
+
 # OCaml: initialize opam and install dune build system
 RUN opam init --auto-setup --disable-sandboxing -y && \
     opam install dune -y && \
