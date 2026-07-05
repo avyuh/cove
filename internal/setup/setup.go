@@ -145,7 +145,9 @@ profile cove %s flags=(unconfined) {
 func ProbeUsernsSelf() error {
 	cmd := exec.Command("/bin/true")
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWUSER,
+		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS |
+			syscall.CLONE_NEWPID | syscall.CLONE_NEWNET |
+			syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS,
 		UidMappings: []syscall.SysProcIDMap{{
 			ContainerID: 0,
 			HostID:      os.Getuid(),

@@ -1,8 +1,22 @@
 package launcher
 
 import (
+	"bufio"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+	"unsafe"
 
+	"cove/internal/box"
 	"cove/internal/config"
 )
 
@@ -29,5 +43,330 @@ func Run(cfg *config.Config, opts Opts) (int, error) {
 		fmt.Printf("project=%s proxy_port=%d agent=%q\n", opts.Project, cfg.Options.ProxyPort, opts.AgentArgv)
 		return 0, nil
 	}
-	return 69, ExitError{Code: 69, Msg: "cove: launcher not implemented before M2"}
+	project, err := resolveProject(opts.Project)
+	if err != nil {
+		return 66, ExitError{Code: 66, Msg: err.Error()}
+	}
+	if err := sweepRoots(false); err != nil && opts.Verbose {
+		fmt.Fprintf(os.Stderr, "cove: cleanup warning: %v\n", err)
+	}
+	dummy, cleanupProxy, err := dummyProxySocket()
+	if err != nil {
+		return 69, err
+	}
+	defer cleanupProxy()
+	d, err := buildDirectives(cfg, opts, project, dummy)
+	if err != nil {
+		return 78, err
+	}
+	code, err := spawnInit(d, opts.Verbose)
+	return code, err
+}
+
+func resolveProject(project string) (string, error) {
+	if project == "" {
+		project = "."
+	}
+	abs, err := filepath.Abs(project)
+	if err != nil {
+		return "", err
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("project path %s not found", abs)
+	}
+	if !st.IsDir() {
+		return "", fmt.Errorf("project path %s is not a directory", abs)
+	}
+	return abs, nil
+}
+
+func buildDirectives(cfg *config.Config, opts Opts, project, proxySock string) (box.Directives, error) {
+	ca, err := os.ReadFile(filepath.Join(config.ConfigDir(), "ca.pem"))
+	if err != nil {
+		return box.Directives{}, fmt.Errorf("read cove CA: %w", err)
+	}
+	bundle, err := os.ReadFile("/etc/ssl/certs/ca-certificates.crt")
+	if err != nil {
+		bundle = nil
+	}
+	bundle = append(append([]byte{}, bundle...), '\n')
+	bundle = append(bundle, ca...)
+	inject := make([]box.InjectDirective, 0, len(cfg.Inject))
+	for _, st := range cfg.Inject {
+		inject = append(inject, box.InjectDirective{
+			DummyEnv:     st.DummyEnv,
+			DummyValue:   st.DummyValue,
+			BaseURLEnv:   st.BaseURLEnv,
+			BaseURLValue: st.BaseURLValue,
+		})
+	}
+	env := map[string]string{}
+	for _, pattern := range cfg.Options.EnvPassthrough {
+		for _, kv := range os.Environ() {
+			name, val, ok := strings.Cut(kv, "=")
+			if !ok {
+				continue
+			}
+			if envMatch(pattern, name) {
+				env[name] = val
+			}
+		}
+	}
+	creds, err := parseCredMounts(cfg.Options.CredMount)
+	if err != nil {
+		return box.Directives{}, err
+	}
+	return box.Directives{
+		Project:        project,
+		ProxySock:      proxySock,
+		ProxyEnabled:   false,
+		TmpSize:        cfg.Options.TmpSize,
+		ProxyPort:      cfg.Options.ProxyPort,
+		AgentArgv:      opts.AgentArgv,
+		Term:           os.Getenv("TERM"),
+		TTY:            isTTY(0) && isTTY(1),
+		CAPEM:          ca,
+		CABundlePEM:    bundle,
+		Inject:         inject,
+		CredMount:      creds,
+		EnvPassthrough: env,
+	}, nil
+}
+
+func spawnInit(d box.Directives, verbose bool) (int, error) {
+	dirR, dirW, err := os.Pipe()
+	if err != nil {
+		return 75, err
+	}
+	statusR, statusW, err := os.Pipe()
+	if err != nil {
+		return 75, err
+	}
+	ctlR, ctlW, err := os.Pipe()
+	if err != nil {
+		return 75, err
+	}
+	defer dirW.Close()
+	defer statusR.Close()
+	defer ctlW.Close()
+
+	cmd := exec.Command("/proc/self/exe", "__init")
+	cmd.Args[0] = "cove-init"
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	cmd.ExtraFiles = []*os.File{dirR, statusW, ctlR}
+	cmd.Env = []string{
+		"COVE_DIR_FD=3",
+		"COVE_STATUS_FD=4",
+		"COVE_CTL_FD=5",
+		"COVE_TERM=" + os.Getenv("TERM"),
+	}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS |
+			syscall.CLONE_NEWPID | syscall.CLONE_NEWNET |
+			syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS,
+		UidMappings: []syscall.SysProcIDMap{{
+			ContainerID: 0,
+			HostID:      os.Getuid(),
+			Size:        1,
+		}},
+		GidMappings: []syscall.SysProcIDMap{{
+			ContainerID: 0,
+			HostID:      os.Getgid(),
+			Size:        1,
+		}},
+		GidMappingsEnableSetgroups: false,
+	}
+
+	raw, rawRestore, err := maybeRaw(d.TTY)
+	if err != nil {
+		return 75, err
+	}
+	if raw {
+		defer rawRestore()
+	}
+	if err := cmd.Start(); err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			return 77, ExitError{Code: 77, Msg: "cove: user namespaces denied; run `cove setup` (needs sudo, once)"}
+		}
+		return 75, err
+	}
+	_ = dirR.Close()
+	_ = statusW.Close()
+	_ = ctlR.Close()
+	if err := json.NewEncoder(dirW).Encode(d); err != nil {
+		return 75, err
+	}
+	_ = dirW.Close()
+	if d.TTY {
+		sendWinsize(ctlW)
+		watchWinsize(ctlW)
+	}
+
+	line, err := bufio.NewReader(statusR).ReadString('\n')
+	if err != nil {
+		_ = cmd.Wait()
+		return 75, ExitError{Code: 75, Msg: "cove: box setup failed before status"}
+	}
+	line = strings.TrimSpace(line)
+	if verbose {
+		fmt.Fprintf(os.Stderr, "cove: init status %s\n", line)
+	}
+	if !strings.HasPrefix(line, "OK") {
+		_ = cmd.Wait()
+		return 75, ExitError{Code: 75, Msg: "cove: box setup failed: " + line}
+	}
+	root := ""
+	if fields := strings.Fields(line); len(fields) > 1 {
+		root = fields[1]
+	}
+	err = cmd.Wait()
+	cleanupRoot(root)
+	if err == nil {
+		return 0, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+			if status.Exited() {
+				return status.ExitStatus(), nil
+			}
+			if status.Signaled() {
+				return 128 + int(status.Signal()), nil
+			}
+		}
+	}
+	return 1, err
+}
+
+func dummyProxySocket() (string, func(), error) {
+	path := filepath.Join(os.TempDir(), fmt.Sprintf("cove-dummy-proxy.%d.sock", os.Getpid()))
+	_ = os.Remove(path)
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return "", func() {}, err
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	return path, func() {
+		_ = ln.Close()
+		<-done
+		_ = os.Remove(path)
+	}, nil
+}
+
+func parseCredMounts(entries []string) ([]box.CredMount, error) {
+	home, _ := os.UserHomeDir()
+	var out []box.CredMount
+	for _, e := range entries {
+		rw := false
+		path := e
+		if strings.HasSuffix(e, ":rw") {
+			rw = true
+			path = strings.TrimSuffix(e, ":rw")
+		}
+		if strings.HasPrefix(path, "~/") {
+			path = filepath.Join(home, strings.TrimPrefix(path, "~/"))
+		}
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return nil, err
+		}
+		rel, err := filepath.Rel(home, abs)
+		if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
+			return nil, fmt.Errorf("cred_mount %q must be under HOME", e)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			fmt.Fprintf(os.Stderr, "cove: warning: cred_mount %s does not exist; skipping\n", abs)
+			continue
+		}
+		mode := "read-only"
+		if rw {
+			mode = "read-write - UNSAFE under concurrent sessions"
+		}
+		fmt.Fprintf(os.Stderr, "cove: credential %q is mounted INTO the box %s (exfil-contained, not theft-proof)\n", e, mode)
+		out = append(out, box.CredMount{Source: abs, Rel: rel, RW: rw})
+	}
+	return out, nil
+}
+
+func envMatch(pattern, name string) bool {
+	if strings.HasSuffix(pattern, "*") {
+		return strings.HasPrefix(name, strings.TrimSuffix(pattern, "*"))
+	}
+	return pattern == name
+}
+
+func sweepRoots(force bool) error {
+	matches, err := filepath.Glob("/tmp/cove-root.*")
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	for _, p := range matches {
+		st, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if !force && now.Sub(st.ModTime()) < 24*time.Hour {
+			continue
+		}
+		_ = syscall.Unmount(p, syscall.MNT_DETACH)
+		_ = os.RemoveAll(p)
+	}
+	return nil
+}
+
+func cleanupRoot(root string) {
+	if root == "" || !strings.HasPrefix(root, "/tmp/cove-root.") {
+		return
+	}
+	_ = syscall.Unmount(root, syscall.MNT_DETACH)
+	_ = os.RemoveAll(root)
+}
+
+func isTTY(fd int) bool {
+	var ws winsize
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.TIOCGWINSZ, uintptr(unsafe.Pointer(&ws)))
+	return errno == 0
+}
+
+type winsize struct {
+	Rows uint16
+	Cols uint16
+	X    uint16
+	Y    uint16
+}
+
+func sendWinsize(w *os.File) {
+	var ws winsize
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(1), syscall.TIOCGWINSZ, uintptr(unsafe.Pointer(&ws)))
+	if errno != 0 || ws.Rows == 0 || ws.Cols == 0 {
+		return
+	}
+	var buf [8]byte
+	binary.LittleEndian.PutUint16(buf[0:2], ws.Rows)
+	binary.LittleEndian.PutUint16(buf[2:4], ws.Cols)
+	binary.LittleEndian.PutUint16(buf[4:6], ws.X)
+	binary.LittleEndian.PutUint16(buf[6:8], ws.Y)
+	_, _ = w.Write(buf[:])
+}
+
+func watchWinsize(w *os.File) {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGWINCH)
+	go func() {
+		for range ch {
+			sendWinsize(w)
+		}
+	}()
 }

@@ -26,7 +26,7 @@ append to the Progress log as milestones complete. Statuses: TODO → IN PROGRES
 |---|---|---|---|---|
 | M0 | Single binary skeleton + argv role dispatch (launcher/proxyd/__init/__apparmor/setup/log) | §2.2, §9/M0, §11.1, §11.2 | `cove --help`/`--version` work; dispatch routes each verb correctly; `go build ./cmd/cove` clean | DONE |
 | M1 | `cove setup`: AppArmor profile, userns probe, CA gen, seed config, dirs (split-privilege) | §4.7, §5.5, §7.2–7.5, §9/M1 | `sudo cove setup` → probe `unshare(CLONE_NEWUSER)` succeeds where it failed before; `ca.pem` 0644 / `ca-key.pem` 0600 user-owned; re-run reports "no changes" (idempotent) | DONE |
-| M2 | The box, no proxy: namespaces, full mount plan, pivot_root, cap-drop, lo-up, pty, exec shell | §3.1–3.6, §9/M2, §13.1–13.3 | `cove -- sh -c 'cat ~/.ssh/id_rsa'` → absent; `ls /work` shows project; `curl https://1.1.1.1` → ENETUNREACH; interactive `cove -- bash` with TTY; `/proc` shows only in-box PIDs, PID 1 = cove-init (e2e §15.2 steps 1–3, minus proxy deny) | TODO |
+| M2 | The box, no proxy: namespaces, full mount plan, pivot_root, cap-drop, lo-up, pty, exec shell | §3.1–3.6, §9/M2, §13.1–13.3 | `cove -- sh -c 'cat ~/.ssh/id_rsa'` → absent; `ls /work` shows project; `curl https://1.1.1.1` → ENETUNREACH; interactive `cove -- bash` with TTY; `/proc` shows only in-box PIDs, PID 1 = cove-init (e2e §15.2 steps 1–3, minus proxy deny) | DONE |
 | M3 | Minimal allow-only proxy (Unix accept, CONNECT parse, allowlist, opaque tunnel, host DNS, audit) — **first milestone that beats bare YOLO** | §4.1–4.4, §4.6, §4.9, §9/M3 | `cove -- codex exec 'say ok'` completes via allow hosts (needs `cred_mount ["~/.codex"]`); CONNECT to non-allowed host → 403 + audit deny record; secrets still absent; raw egress still fails | TODO |
 | M4 | **h2 MITM inject (make-or-break, gates the whole inject feature)**: leaf minting, client-facing h2 TLS termination, ReverseProxy strip+inject, FlushInterval=-1, upstream h2 | §4.5, §4.7, §4.8, §9/M4, §14 | `cove -- claude -p "reply with exactly: COVE-OK"` → real streamed 200 through MITM+inject over h2, token host-side only, box holds dummy `ANTHROPIC_API_KEY` (dummy `x-api-key` stripped); audit shows `POST /v1/messages` status 200; if h2 misbehaves, prove `alpn="http/1.1"` downgrade (e2e step 4) | TODO |
 | M5 | Interactive polish: signal forwarding, SIGWINCH resize via control pipe, termios save/restore, exit-code propagation, cap-drop verified | §3.4–3.5, §6.1, §9/M5, §13.2 steps 12a–13 | `cove -- claude` TUI resizes on window change; Ctrl-C hits the agent not the launcher; exit codes match bare runs (incl. status-pipe/75 disambiguation); agent has empty cap bounding set + no_new_privs | TODO |
@@ -70,6 +70,14 @@ Planned order: **M4 → M5 → M6 → M7 → M8** (straight §9 order). Notes:
 
 ## Gates requiring main/human
 
+- **M4 make-or-break sign-off (real-claude h2 inject).** Locally testable —
+  a valid Claude OAuth token is on this box at `~/.claude/.credentials.json` —
+  but the RESULT is a gate: main reviews the evidence (streamed `COVE-OK`
+  completion, audit `POST /v1/messages` status 200, proof the box only ever
+  held the dummy `ANTHROPIC_API_KEY`) before M6 inject work proceeds. If M4
+  fails on h2 AND on the `alpn="http/1.1"` downgrade, mark BLOCKED and STOP:
+  whether to cut the TLS-MITM inject feature is an owner scope decision, not
+  a codex retry loop.
 - **Final `git push`** — main handles (commits per-milestone are main's call
   too; never auto-commit).
 - **Any milestone still failing after ~3 codex attempts** → mark BLOCKED here,
@@ -99,3 +107,16 @@ Planned order: **M4 → M5 → M6 → M7 → M8** (straight §9 order). Notes:
   on this host, so setup correctly skipped the AppArmor write per §7.1; rerun
   reported `no changes`; `go test ./internal/config -run TestSeedValidates`
   passed.
+- 2026-07-05 — M2 — DONE — `go build ./...`, `go vet ./...`, and
+  `go test ./...` passed; loaded `/etc/apparmor.d/cove` after the full clone
+  set (`NEWUSER|NEWNS|NEWPID|NEWNET|NEWIPC|NEWUTS`) showed the userns-only M1
+  probe was too narrow, and updated setup to probe the full shape. Verify:
+  `cove -- /bin/sh -c 'cat ~/.ssh/* 2>&1 || echo ABSENT'` showed `/root/.ssh`
+  absent and printed `ABSENT`; `cove -- /bin/sh -c 'ls /work | head'` listed the
+  repo; `/work` write probe wrote `hi`; `curl -m3 https://1.1.1.1` failed
+  immediately with curl exit 7 from the route-less netns; `/proc/1/cmdline`
+  showed `cove-init __init` and only in-box PIDs; PTY probe
+  `cove -- /bin/bash -lc 'test -t 0 && echo TTY && tty && stty size'` printed
+  `TTY`, `/dev/pts/0`, and `24 80`; boxed `/bin/true` left no stale
+  `/tmp/cove-root.*` after exact-root cleanup. `sudo cove setup` rerun reported
+  `no changes` with the full-clone probe.
