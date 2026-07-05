@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -128,7 +130,11 @@ func runAgent(d Directives, statusFD int, root string) (int, error) {
 	if d.TTY {
 		return runAgentPTY(d, env, statusFD, root)
 	}
-	cmd := exec.Command(d.AgentArgv[0], d.AgentArgv[1:]...)
+	agent, err := resolveAgentPath(d.AgentArgv[0], env)
+	if err != nil {
+		return 0, err
+	}
+	cmd := exec.Command(agent, d.AgentArgv[1:]...)
 	cmd.Env = env
 	cmd.Stdin = os.NewFile(0, "stdin")
 	cmd.Stdout = os.NewFile(1, "stdout")
@@ -144,6 +150,38 @@ func runAgent(d Directives, statusFD int, root string) (int, error) {
 
 func agentNotFound(err error) bool {
 	return errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist)
+}
+
+func resolveAgentPath(name string, env []string) (string, error) {
+	if strings.ContainsRune(name, '/') {
+		return name, nil
+	}
+	path := envValue(env, "PATH")
+	if path == "" {
+		path = os.Getenv("PATH")
+	}
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" {
+			dir = "."
+		}
+		candidate := filepath.Join(dir, name)
+		st, err := os.Stat(candidate)
+		if err != nil || st.IsDir() || st.Mode().Perm()&0111 == 0 {
+			continue
+		}
+		return candidate, nil
+	}
+	return "", exec.ErrNotFound
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return strings.TrimPrefix(kv, prefix)
+		}
+	}
+	return ""
 }
 
 func forwardSignals(pid int) {

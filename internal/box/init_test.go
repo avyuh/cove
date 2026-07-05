@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"testing"
 )
@@ -17,6 +18,22 @@ func TestAgentNotFoundClassifiesENOENT(t *testing.T) {
 	}
 	if agentNotFound(errors.New("other")) {
 		t.Fatalf("unrelated error was classified")
+	}
+}
+
+func TestResolveAgentPathUsesBoxEnvPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "/definitely/not/the/box/path")
+	got, err := resolveAgentPath("agent", []string{"PATH=" + dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != path {
+		t.Fatalf("resolved path = %q, want %q", got, path)
 	}
 }
 

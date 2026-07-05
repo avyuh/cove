@@ -21,6 +21,8 @@ type AuditRecord struct {
 	BytesUp int64     `json:"bytes_up"`
 	BytesDn int64     `json:"bytes_down"`
 	DurMS   int64     `json:"dur_ms"`
+	Level   string    `json:"level,omitempty"`
+	Message string    `json:"message,omitempty"`
 	Agent   string    `json:"agent,omitempty"`
 }
 

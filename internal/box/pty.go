@@ -28,7 +28,12 @@ func runAgentPTY(d Directives, env []string, statusFD int, root string) (int, er
 	if err != nil {
 		return 0, err
 	}
-	cmd := exec.Command(d.AgentArgv[0], d.AgentArgv[1:]...)
+	agent, err := resolveAgentPath(d.AgentArgv[0], env)
+	if err != nil {
+		_ = slave.Close()
+		return 0, err
+	}
+	cmd := exec.Command(agent, d.AgentArgv[1:]...)
 	cmd.Env = env
 	cmd.Stdin = slave
 	cmd.Stdout = slave

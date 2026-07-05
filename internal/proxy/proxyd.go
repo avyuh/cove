@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"cove/internal/config"
+	"cove/internal/secret"
 	"cove/internal/version"
 )
 
@@ -37,11 +38,16 @@ type Proxyd struct {
 	cfg      *config.Config
 	matcher  *Matcher
 	audit    *AuditWriter
+	ca       *CA
+	secrets  *secret.Cache
 	stateDir string
 	sessDir  string
 	log      io.Writer
 	lookupIP lookupIPFunc
 	dialTCP  dialTCPFunc
+
+	warnMu        sync.Mutex
+	warnedRelogin map[[32]byte]struct{}
 }
 
 type lookupIPFunc func(context.Context, string) ([]net.IPAddr, error)
@@ -81,10 +87,16 @@ func Serve(cfg *config.Config, sockPath string) error {
 		return err
 	}
 	defer audit.Close()
+	ca, err := LoadCA(filepath.Join(config.ConfigDir(), "ca.pem"), filepath.Join(config.ConfigDir(), "ca-key.pem"))
+	if err != nil {
+		return fmt.Errorf("load CA: %w", err)
+	}
 	p := &Proxyd{
 		cfg:      cfg,
 		matcher:  NewMatcher(cfg),
 		audit:    audit,
+		ca:       ca,
+		secrets:  secret.NewCache(os.Stderr),
 		stateDir: state,
 		sessDir:  sessions,
 		log:      os.Stderr,
@@ -165,6 +177,8 @@ func (p *Proxyd) register(control net.Conn, sess Session) {
 			p.mu.RLock()
 			matcher := p.matcher
 			audit := p.audit
+			ca := p.ca
+			secrets := p.secrets
 			p.mu.RUnlock()
 			conn := &Conn{
 				raw:     c,
@@ -172,6 +186,8 @@ func (p *Proxyd) register(control net.Conn, sess Session) {
 				sess:    sess,
 				proxy:   p,
 				matcher: matcher,
+				ca:      ca,
+				secrets: secrets,
 				audit:   audit,
 				started: timeNow(),
 			}

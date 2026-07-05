@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"cove/internal/secret"
@@ -33,7 +34,6 @@ type Target struct {
 type Matcher struct {
 	rules []compiledRule
 }
-type CA struct{}
 
 func (c *Conn) handle() {
 	defer c.raw.Close()
@@ -68,9 +68,19 @@ func (c *Conn) handle() {
 			break
 		}
 	}
-	policy, _ := c.matcher.Match(t.Host, t.Port)
+	policy, stanza := c.matcher.Match(t.Host, t.Port)
 	if policy == PolicyDeny {
 		c.deny(t, 403, "denied by cove policy\n")
+		return
+	}
+	if policy == PolicyInject {
+		if stanza == nil {
+			c.deny(t, 502, "inject policy unavailable\n")
+			return
+		}
+		if err := c.serveInject(c.raw, c.br, t, stanza); err != nil && !isClosed(err) {
+			fmt.Fprintf(c.proxy.log, "cove proxyd: inject %s:%d: %v\n", t.Host, t.Port, err)
+		}
 		return
 	}
 	if err := c.tunnel(t, policy); err != nil {
@@ -196,9 +206,41 @@ func (c *Conn) emit(rec *AuditRecord) {
 }
 
 func (p *Proxyd) dialAllowed(t Target) (net.Conn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	return p.dialResolved(t)(context.Background(), "tcp", net.JoinHostPort(t.Host, strconv.Itoa(t.Port)))
+}
+
+func (p *Proxyd) dialResolved(t Target) func(context.Context, string, string) (net.Conn, error) {
+	var (
+		once sync.Once
+		ip   net.IP
+		err  error
+	)
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		once.Do(func() {
+			ip, err = p.resolveOnce(ctx, t.Host)
+		})
+		if err != nil {
+			return nil, err
+		}
+		_, portText, splitErr := net.SplitHostPort(addr)
+		if splitErr != nil || portText == "" {
+			portText = strconv.Itoa(t.Port)
+		}
+		d := net.Dialer{Timeout: 10 * time.Second}
+		dial := d.DialContext
+		if p.dialTCP != nil {
+			dial = p.dialTCP
+		}
+		return dial(ctx, network, net.JoinHostPort(ip.String(), portText))
+	}
+}
+
+func (p *Proxyd) resolveOnce(ctx context.Context, host string) (net.IP, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	host := t.Host
 	ip := net.ParseIP(host)
 	if ip == nil {
 		lookup := net.DefaultResolver.LookupIPAddr
@@ -214,10 +256,5 @@ func (p *Proxyd) dialAllowed(t Target) (net.Conn, error) {
 		}
 		ip = addrs[0].IP
 	}
-	d := net.Dialer{Timeout: 10 * time.Second}
-	dial := d.DialContext
-	if p.dialTCP != nil {
-		dial = p.dialTCP
-	}
-	return dial(ctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(t.Port)))
+	return ip, nil
 }

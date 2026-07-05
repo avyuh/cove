@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,6 +106,54 @@ func TestCountingReadCloserCountsAndClosesOnce(t *testing.T) {
 	}
 }
 
+func TestInjectAuditFinalizesAtBodyClose(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+	a, err := NewAuditWriter(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	c := &Conn{
+		sess:    Session{ID: "abc12345", Agent: "claude"},
+		audit:   a,
+		started: time.Now().Add(-time.Second),
+	}
+	resp := &http.Response{
+		StatusCode: 200,
+		Request:    mustRequest(t, "POST", "https://api.test/v1/messages?beta=true"),
+	}
+	rec := c.newInjectRecord(Target{Host: "api.test", Port: 443}, resp, 7)
+	if rec.Status != 200 || rec.Method != "POST" || rec.Path != "/v1/messages?beta=true" {
+		t.Fatalf("header-stage record missing status/method/path: %+v", rec)
+	}
+	if data, err := os.ReadFile(path); err != nil {
+		t.Fatal(err)
+	} else if len(data) != 0 {
+		t.Fatalf("record emitted before body close: %q", data)
+	}
+	body := &countingReadCloser{rc: io.NopCloser(strings.NewReader("chunk-one\nchunk-two\n")), onClose: func(n int64) {
+		rec.BytesDn = n
+		rec.DurMS = time.Since(c.started).Milliseconds()
+		c.emit(rec)
+	}}
+	if _, err := io.ReadAll(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_ = a.Close()
+	recs := readAuditRecords(t, path)
+	if len(recs) != 1 {
+		t.Fatalf("audit records = %d, want 1", len(recs))
+	}
+	got := recs[0]
+	if got.Policy != "inject" || got.Status != 200 || got.BytesUp != 7 || got.BytesDn == 0 || got.DurMS == 0 {
+		t.Fatalf("unexpected finalized inject record: %+v", got)
+	}
+}
+
 type panicOnDoubleCloseReadCloser struct {
 	r      *strings.Reader
 	closes int
@@ -123,3 +172,12 @@ func (p *panicOnDoubleCloseReadCloser) Close() error {
 }
 
 var _ io.ReadCloser = (*panicOnDoubleCloseReadCloser)(nil)
+
+func mustRequest(t *testing.T, method, rawURL string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(method, rawURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req
+}

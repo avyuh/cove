@@ -56,6 +56,40 @@ func TestJSONSecretDottedExtraction(t *testing.T) {
 	}
 }
 
+func TestJSONSecretMTimeCacheInvalidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".credentials.json")
+	if err := os.WriteFile(path, []byte(`{"claudeAiOauth":{"accessToken":"first"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := NewCache(nil)
+	ref := "json:" + path + "#claudeAiOauth.accessToken"
+	got, err := c.Resolve(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "first" {
+		t.Fatalf("got %q, want first", got)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"claudeAiOauth":{"accessToken":"second"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	next := info.ModTime().Add(time.Second)
+	if err := os.Chtimes(path, next, next); err != nil {
+		t.Fatal(err)
+	}
+	got, err = c.Resolve(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "second" {
+		t.Fatalf("got %q, want second", got)
+	}
+}
+
 func TestEnvSecretCaptureOnce(t *testing.T) {
 	t.Setenv("COVE_SECRET_TEST", "first")
 	c := NewCache(nil)
