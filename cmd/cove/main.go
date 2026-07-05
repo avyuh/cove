@@ -28,6 +28,8 @@ func run(args []string) int {
 		return proxydMain(args[2:])
 	case "__init":
 		return box.InitMain()
+	case "__agent":
+		return box.AgentMain(args[2:])
 	case "__apparmor":
 		return exitFor(setup.ApparmorOnly())
 	case "__probe_userns":
@@ -46,7 +48,7 @@ func detectRole(args []string) string {
 		return "launcher"
 	}
 	switch args[1] {
-	case "proxyd", "__init", "__apparmor", "__probe_userns", "setup", "log":
+	case "proxyd", "__init", "__agent", "__apparmor", "__probe_userns", "setup", "log":
 		return args[1]
 	default:
 		return "launcher"

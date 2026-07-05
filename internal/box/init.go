@@ -134,18 +134,14 @@ func runAgent(d Directives, statusFD int, root string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	cmd := exec.Command(agent, d.AgentArgv[1:]...)
-	cmd.Env = env
-	cmd.Stdin = os.NewFile(0, "stdin")
-	cmd.Stdout = os.NewFile(1, "stdout")
-	cmd.Stderr = os.NewFile(2, "stderr")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
+	proc, err := startAgentChild(agent, d.AgentArgv[1:], env, statusFD, root, "", nil, nil)
+	if err != nil {
 		return 0, err
 	}
-	writeStatus(statusFD, "OK "+root)
-	forwardSignals(cmd.Process.Pid)
-	return waitForPID(cmd.Process.Pid), nil
+	forwardSignals(proc.Pid)
+	code := waitForPID(proc.Pid)
+	_ = proc.Release()
+	return code, nil
 }
 
 func agentNotFound(err error) bool {
@@ -222,4 +218,42 @@ func copyAndClose(dst, src *os.File) {
 	_, _ = io.Copy(dst, src)
 	_ = dst.Close()
 	_ = src.Close()
+}
+
+func startAgentChild(agent string, args []string, env []string, statusFD int, root string, slavePath string, ctl *os.File, master *os.File) (*os.Process, error) {
+	if slavePath == "" {
+		slavePath = "-"
+	}
+	masterFD := -1
+	if master != nil {
+		masterFD = agentPTYMasterFD
+	}
+	argv := append([]string{"cove-agent", "__agent", root, slavePath, strconv.Itoa(masterFD), agent}, args...)
+	status := os.NewFile(uintptr(statusFD), "cove-status")
+	files := []*os.File{
+		os.Stdin,
+		os.Stdout,
+		os.Stderr,
+		nil,
+		status,
+	}
+	if slavePath != "-" {
+		files[0], files[1], files[2] = nil, nil, nil
+		files = append(files, ctl, master)
+	}
+	sys := &syscall.SysProcAttr{}
+	if slavePath != "-" {
+		sys.Setsid = true
+	} else {
+		sys.Setpgid = true
+	}
+	proc, err := os.StartProcess(agentTrampolinePath, argv, &os.ProcAttr{
+		Env:   scrubAgentEnv(env),
+		Files: files,
+		Sys:   sys,
+	})
+	if err == nil {
+		_ = os.Remove(agentTrampolinePath)
+	}
+	return proc, err
 }

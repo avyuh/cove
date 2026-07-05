@@ -2,6 +2,7 @@
 set -euo pipefail
 
 COVE_BIN="${COVE_BIN:-/usr/local/bin/cove}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="$(mktemp -d)"
 failures=0
 created_bait=()
@@ -197,8 +198,19 @@ check_status() {
   nnp="$(field_value NoNewPrivs "$f")"
   test "$nnp" = "1" || { echo "$f NoNewPrivs=$nnp"; exit 1; }
 }
+print_status() {
+  label="$1"
+  f="$2"
+  printf "%s" "$label"
+  for field in CapInh CapPrm CapEff CapBnd CapAmb; do
+    printf " %s=%s" "$field" "$(field_value "$field" "$f")"
+  done
+  printf " NoNewPrivs=%s\n" "$(field_value NoNewPrivs "$f")"
+}
 check_status /proc/self/status
 check_status /proc/1/status
+print_status agent /proc/self/status
+print_status pid1 /proc/1/status
 pids="$(find /proc -maxdepth 1 -type d -name "[0-9]*" -printf "%f\n" | wc -l)"
 echo "proc_pid_count=$pids"
 test "$pids" -le 25'
@@ -301,14 +313,40 @@ g_exit_codes() {
   bad_cfg="$(mktemp -d "$WORK/badcfg.XXXXXX")"
   mkdir -p "$bad_cfg/cove"
   printf '[[inject]\n' >"$bad_cfg/cove/config.toml"
+  local setup_fail_cfg
+  setup_fail_cfg="$(mktemp -d "$WORK/setupfail.XXXXXX")"
+  mkdir -p "$setup_fail_cfg/cove"
+  cp "$ca_pem" "$setup_fail_cfg/cove/ca.pem"
+  printf '[options]\ntmp_size = "not-a-size"\nproxy_port = 8080\naudit = false\nallow = []\n' >"$setup_fail_cfg/cove/config.toml"
   expect_exit 66 "$COVE_BIN" --project "$WORK/no-such-project" -- /bin/true
   expect_exit 78 env XDG_CONFIG_HOME="$bad_cfg" "$COVE_BIN" -- /bin/true
   expect_exit 64 "$COVE_BIN" --bad-flag
   expect_exit 64 "$COVE_BIN"
   expect_exit 0 "$COVE_BIN" -- /bin/true
+  echo "exit 0 -> 0"
   expect_exit 70 "$COVE_BIN" -- /bin/sh -c 'exit 70'
+  echo "exit 70 -> 70"
   expect_exit 42 "$COVE_BIN" -- /bin/sh -c 'exit 42'
+  echo "exit 42 -> 42"
+  expect_exit 143 "$COVE_BIN" -- /bin/sh -c 'kill -TERM $$; sleep 1'
+  echo "signal TERM -> 143"
+  expect_exit 75 env XDG_CONFIG_HOME="$setup_fail_cfg" "$COVE_BIN" -- /bin/true
+  echo "box setup failure -> 75"
   expect_exit 127 "$COVE_BIN" -- nonesuch-binary-cove-test
+  echo "missing agent -> 127"
+}
+
+non_tty_pipe() {
+  set +e
+  "$COVE_BIN" -- /bin/sh -c 'echo hi' | cat >"$WORK/non-tty-pipe.out" 2>"$WORK/non-tty-pipe.err"
+  local rc=${PIPESTATUS[0]}
+  set -e
+  test "$rc" -eq 0 || { echo "cove rc=$rc"; cat "$WORK/non-tty-pipe.err"; return 1; }
+  grep -Fx hi "$WORK/non-tty-pipe.out" >/dev/null
+}
+
+m5_pty_signal() {
+  python3 "$SCRIPT_DIR/e2e-pty.py"
 }
 
 check prereq require_paths
@@ -328,6 +366,8 @@ check B7-allow-opaque b7_allow_opaque
 check E-pypi-allow-audit e_pypi_allow_audit
 check E-log-filters e_log_filters
 check G-exit-codes g_exit_codes
+check M5-non-tty-pipe non_tty_pipe
+check M5-pty-signal-resize m5_pty_signal
 
 if [[ $failures -ne 0 ]]; then
   echo "FAILURES $failures"

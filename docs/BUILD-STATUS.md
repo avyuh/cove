@@ -55,8 +55,8 @@ F streaming, G error paths). Rules:
 | M1 | `cove setup`: AppArmor profile, userns probe, CA gen, seed config, dirs (split-privilege) | §4.7, §5.5, §7.2–7.5, §9/M1 | `sudo cove setup` → probe `unshare(CLONE_NEWUSER)` succeeds where it failed before; `ca.pem` 0644 / `ca-key.pem` 0600 user-owned; re-run reports "no changes" (idempotent) | DONE |
 | M2 | The box, no proxy: namespaces, full mount plan, pivot_root, cap-drop, lo-up, pty, exec shell | §3.1–3.6, §9/M2, §13.1–13.3 | `cove -- sh -c 'cat ~/.ssh/id_rsa'` → absent; `ls /work` shows project; `curl https://1.1.1.1` → ENETUNREACH; interactive `cove -- bash` with TTY; `/proc` shows only in-box PIDs, PID 1 = cove-init (e2e §15.2 steps 1–3, minus proxy deny) | DONE |
 | M3 | Minimal allow-only proxy (Unix accept, CONNECT parse, allowlist, opaque tunnel, host DNS, audit) — **first milestone that beats bare YOLO** | §4.1–4.4, §4.6, §4.9, §9/M3 | `cove -- codex exec 'say ok'` completes via allow hosts (needs `cred_mount ["~/.codex"]`); CONNECT to non-allowed host → 403 + audit deny record; secrets still absent; raw egress still fails | DONE |
-| M4 | **h2 MITM inject (make-or-break, gates the whole inject feature)**: leaf minting, client-facing h2 TLS termination, ReverseProxy strip+inject, FlushInterval=-1, upstream h2 | §4.5, §4.7, §4.8, §9/M4, §14 | `cove -- claude -p "reply with exactly: COVE-OK"` → real streamed 200 through MITM+inject over h2, token host-side only, box holds dummy `ANTHROPIC_API_KEY` (dummy `x-api-key` stripped); audit shows `POST /v1/messages` status 200; if h2 misbehaves, prove `alpn="http/1.1"` downgrade (e2e step 4) | TODO |
-| M5 | Interactive polish: signal forwarding, SIGWINCH resize via control pipe, termios save/restore, exit-code propagation, cap-drop verified | §3.4–3.5, §6.1, §9/M5, §13.2 steps 12a–13 | `cove -- claude` TUI resizes on window change; Ctrl-C hits the agent not the launcher; exit codes match bare runs (incl. status-pipe/75 disambiguation); agent has empty cap bounding set + no_new_privs | TODO |
+| M4 | **h2 MITM inject (make-or-break, gates the whole inject feature)**: leaf minting, client-facing h2 TLS termination, ReverseProxy strip+inject, FlushInterval=-1, upstream h2 | §4.5, §4.7, §4.8, §9/M4, §14 | `cove -- claude -p "reply with exactly: COVE-OK"` → real streamed 200 through MITM+inject over h2, token host-side only, box holds dummy `ANTHROPIC_API_KEY` (dummy `x-api-key` stripped); audit shows `POST /v1/messages` status 200; if h2 misbehaves, prove `alpn="http/1.1"` downgrade (e2e step 4) | DONE |
+| M5 | Interactive polish: signal forwarding, SIGWINCH resize via control pipe, termios save/restore, exit-code propagation, cap-drop verified | §3.4–3.5, §6.1, §9/M5, §13.2 steps 12a–13 | `cove -- claude` TUI resizes on window change; Ctrl-C hits the agent not the launcher; exit codes match bare runs (incl. status-pipe/75 disambiguation); agent has empty cap bounding set + no_new_privs | IN PROGRESS |
 | M6 | Full proxy/config: base_url rewrites, kimi plain-HTTP loopback, cred_mount/env_passthrough, all seed stanzas, Validate() | §3.7b, §3.8, §5 (all), §9/M6, §12.1 | Kimi flow works via dynamic-port `KIMI_BASE_URL` loopback with injected key; each seed inject stanza round-trips against a stub upstream; config with host in both allow+inject fails to load; embedded seed passes `Validate()` (§15.1 B1 test) | TODO |
 | M7 | Lifecycle/robustness: auto-spawn + PING/PONG, flock singleton, SIGHUP reload, per-session sockets/REGISTER, crash sweep, fail-closed, audit rotation | §3.9, §4.1, §4.10, §9/M7 | Kill proxy mid-session → egress fails closed; next run auto-spawns fresh proxy; 20 concurrent sessions all proxy correctly (20/20 200s); no leaked `/tmp/cove-root.*` or `sessions/*.sock` after `kill -9` of a launcher | TODO |
 | M8 | `cove log` verb + docs/positioning copy | §6.4, §8.4, §9/M8 | `cove log --follow --deny-only` shows denials live; filters (`--session`, `--host`) work; NO string anywhere says "secure sandbox" | TODO |
@@ -155,6 +155,9 @@ Planned order: **M4 → M5 → M6 → M7 → M8** (straight §9 order). Notes:
   `TTY`, `/dev/pts/0`, and `24 80`; boxed `/bin/true` left no stale
   `/tmp/cove-root.*` after exact-root cleanup. `sudo cove setup` rerun reported
   `no changes` with the full-clone probe.
+- 2026-07-05 — TESTPLAN — ADOPTED — owner directive: `docs/TESTPLAN.md` is the
+  standing test bar (A–G). Every milestone adds real tests for its surface; thin
+  tests = reviewer BLOCKER; final adversarial TESTER A–G sweep gates "done".
 - 2026-07-05 — M3 — DONE — `go build ./...`, `go vet ./...`, and
   `go test ./...` passed; proxy auto-spawned and answered PING/PONG, REGISTER
   created per-session sockets, and `/home/dev/.local/state/cove/proxyd.sock` plus
@@ -166,6 +169,26 @@ Planned order: **M4 → M5 → M6 → M7 → M8** (straight §9 order). Notes:
   absent (`/root/.ssh/*` missing + `ABSENT`); `/work` listed the repo and a write
   probe wrote `hi`; the audit log contains a close-time allow record for
   `github.com` with nonzero `bytes_up`/`bytes_down`; no `/tmp/cove-root.*` leaks.
+- 2026-07-05 — BACKFILL-M0M3 — DONE — codex added TESTPLAN A unit tables (setup/
+  secret/audit/allowlist/conn/launcher + config gaps, 8 new test files, 36 test
+  funcs) + `scripts/e2e-box.sh` automating B1–B7 + E/G; fixed the exit-127
+  conformance bug (missing agent → 127, not 75) TDD. Reviewer QC PASS —
+  sabotaged B6/B2 → script correctly reported FAIL exit 1 (real, fails-closed);
+  additive-only, build/vet/test/gofmt clean. Committed locally (no push).
+- 2026-07-05 — M4 — DONE — h2 MITM inject (make-or-break). Reviewer QC PASS:
+  both legs (h2 `http2.Server.ServeConn` + h1 `blockingOneShotListener`) proven
+  real vs a live httptest h2 upstream; C1 strip-then-inject verified at the
+  upstream (dummy `x-api-key` stripped, real OAuth Bearer injected); token absent
+  BY CONSTRUCTION (box directive has no secret field; resolved only in proxyd);
+  upstream uses host real roots; streaming incremental-flush proven;
+  CA key host-only; allow-path still opaque; deps within guardrail (added only
+  `golang.org/x/net/http2`); additive. Committed locally (no push).
+- 2026-07-05 — M5 — IN PROGRESS — dispatched codex work-order: complete the §3.5
+  pty recipe end-to-end (box CTL_FD winsize reader→TIOCSWINSZ, agent-child
+  setsid/TIOCSCTTY, copy loops), full signal forwarding to the agent pgroup,
+  termios restore on all exit paths, exit-code propagation (70-vs-75 preserved),
+  fold in §13.2 step-13 belt no_new_privs/capset re-assert + fd hygiene (N7);
+  automated B caps test + pty/signal/exit-code tests.
 - 2026-07-05 — M0–M3 TEST-BACKFILL — DONE — added repeatable TESTPLAN A unit
   tables plus `scripts/e2e-box.sh` for B/E/G; `go build ./...`, `go vet ./...`,
   `go test ./... -count=1`, and `bash scripts/e2e-box.sh` passed. Deferred

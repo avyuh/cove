@@ -149,23 +149,33 @@ func spawnInit(d box.Directives, verbose bool) (int, error) {
 	if err != nil {
 		return 75, err
 	}
-	ctlR, ctlW, err := os.Pipe()
-	if err != nil {
-		return 75, err
+	var ctlR, ctlW *os.File
+	if d.TTY {
+		ctlR, ctlW, err = os.Pipe()
+		if err != nil {
+			return 75, err
+		}
+		defer ctlW.Close()
 	}
 	defer dirW.Close()
 	defer statusR.Close()
-	defer ctlW.Close()
 
-	cmd := exec.Command("/proc/self/exe", "__init")
+	self, err := os.Executable()
+	if err != nil || self == "" {
+		self = "/proc/self/exe"
+	}
+	cmd := exec.Command(self, "__init")
 	cmd.Args[0] = "cove-init"
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	cmd.ExtraFiles = []*os.File{dirR, statusW, ctlR}
+	cmd.ExtraFiles = []*os.File{dirR, statusW}
 	cmd.Env = []string{
 		"COVE_DIR_FD=3",
 		"COVE_STATUS_FD=4",
-		"COVE_CTL_FD=5",
 		"COVE_TERM=" + os.Getenv("TERM"),
+	}
+	if d.TTY {
+		cmd.ExtraFiles = append(cmd.ExtraFiles, ctlR)
+		cmd.Env = append(cmd.Env, "COVE_CTL_FD=5")
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS |
@@ -189,6 +199,8 @@ func spawnInit(d box.Directives, verbose bool) (int, error) {
 		return 75, err
 	}
 	if raw {
+		stopSignalRestore := installRawSignalRestore(rawRestore)
+		defer stopSignalRestore()
 		defer rawRestore()
 	}
 	if err := cmd.Start(); err != nil {
@@ -199,7 +211,9 @@ func spawnInit(d box.Directives, verbose bool) (int, error) {
 	}
 	_ = dirR.Close()
 	_ = statusW.Close()
-	_ = ctlR.Close()
+	if ctlR != nil {
+		_ = ctlR.Close()
+	}
 	if err := json.NewEncoder(dirW).Encode(d); err != nil {
 		return 75, err
 	}
@@ -344,7 +358,11 @@ func spawnProxy() error {
 		return err
 	}
 	defer null.Close()
-	cmd := exec.Command("/proc/self/exe", "proxyd")
+	self, err := os.Executable()
+	if err != nil || self == "" {
+		self = "/proc/self/exe"
+	}
+	cmd := exec.Command(self, "proxyd")
 	cmd.Stdin = null
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -481,4 +499,28 @@ func watchWinsize(w *os.File) {
 			sendWinsize(w)
 		}
 	}()
+}
+
+func installRawSignalRestore(restore func()) func() {
+	ch := make(chan os.Signal, 2)
+	done := make(chan struct{})
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		select {
+		case sig := <-ch:
+			restore()
+			signal.Stop(ch)
+			signal.Reset(sig)
+			if s, ok := sig.(syscall.Signal); ok {
+				_ = syscall.Kill(os.Getpid(), s)
+				os.Exit(128 + int(s))
+			}
+			os.Exit(1)
+		case <-done:
+			signal.Stop(ch)
+		}
+	}()
+	return func() {
+		close(done)
+	}
 }

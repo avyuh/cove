@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strconv"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -24,36 +24,30 @@ func runAgentPTY(d Directives, env []string, statusFD int, root string) (int, er
 		return 0, err
 	}
 	defer master.Close()
-	slave, err := os.OpenFile(slavePath, os.O_RDWR|syscall.O_NOCTTY, 0)
-	if err != nil {
-		return 0, err
-	}
 	agent, err := resolveAgentPath(d.AgentArgv[0], env)
 	if err != nil {
-		_ = slave.Close()
 		return 0, err
 	}
-	cmd := exec.Command(agent, d.AgentArgv[1:]...)
-	cmd.Env = env
-	cmd.Stdin = slave
-	cmd.Stdout = slave
-	cmd.Stderr = slave
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
-	if err := cmd.Start(); err != nil {
-		_ = slave.Close()
+	ctl := controlFile()
+	if ctl != nil {
+		applyInitialWinsize(master, ctl, 200*time.Millisecond)
+		go readWinsize(master, ctl)
+	}
+	proc, err := startAgentChild(agent, d.AgentArgv[1:], env, statusFD, root, slavePath, ctl, master)
+	if err != nil {
 		return 0, err
 	}
-	_ = slave.Close()
-	writeStatus(statusFD, "OK "+root)
-	forwardSignals(cmd.Process.Pid)
+	forwardSignals(proc.Pid)
 	go func() {
-		_, _ = io.Copy(master, os.NewFile(0, "stdin"))
+		_, _ = io.Copy(master, os.Stdin)
 	}()
 	go func() {
-		_, _ = io.Copy(os.NewFile(1, "stdout"), master)
+		_, _ = io.Copy(os.Stdout, master)
 	}()
-	go readWinsize(master)
-	return waitForPID(cmd.Process.Pid), nil
+	code := waitForPID(proc.Pid)
+	_ = proc.Release()
+	_ = master.Close()
+	return code, nil
 }
 
 func openPTY() (*os.File, string, error) {
@@ -74,31 +68,61 @@ func openPTY() (*os.File, string, error) {
 	return master, "/dev/pts/" + strconv.Itoa(int(n)), nil
 }
 
-func readWinsize(master *os.File) {
+func controlFile() *os.File {
 	fd, err := strconv.Atoi(os.Getenv("COVE_CTL_FD"))
 	if err != nil || fd <= 0 {
-		return
+		return nil
 	}
 	f := os.NewFile(uintptr(fd), "cove-ctl")
 	if f == nil {
-		return
+		return nil
 	}
-	buf := make([]byte, 8)
+	return f
+}
+
+func applyInitialWinsize(master *os.File, ctl *os.File, timeout time.Duration) {
+	fd := int(ctl.Fd())
+	_ = syscall.SetNonblock(fd, true)
+	defer syscall.SetNonblock(fd, false)
+	deadline := time.Now().Add(timeout)
+	var buf [8]byte
 	for {
-		if _, err := io.ReadFull(f, buf); err != nil {
+		n, err := syscall.Read(fd, buf[:])
+		if n == len(buf) {
+			applyWinsize(master, buf[:])
 			return
 		}
-		ws := winsize{
-			Rows: binary.LittleEndian.Uint16(buf[0:2]),
-			Cols: binary.LittleEndian.Uint16(buf[2:4]),
-			X:    binary.LittleEndian.Uint16(buf[4:6]),
-			Y:    binary.LittleEndian.Uint16(buf[6:8]),
+		if err != syscall.EAGAIN && err != syscall.EWOULDBLOCK && err != syscall.EINTR {
+			return
 		}
-		if ws.Rows == 0 || ws.Cols == 0 {
-			continue
+		if time.Now().After(deadline) {
+			return
 		}
-		_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, master.Fd(), syscall.TIOCSWINSZ, uintptr(unsafe.Pointer(&ws)))
+		time.Sleep(time.Millisecond)
 	}
+}
+
+func readWinsize(master *os.File, ctl *os.File) {
+	buf := make([]byte, 8)
+	for {
+		if _, err := io.ReadFull(ctl, buf); err != nil {
+			return
+		}
+		applyWinsize(master, buf)
+	}
+}
+
+func applyWinsize(master *os.File, buf []byte) {
+	ws := winsize{
+		Rows: binary.LittleEndian.Uint16(buf[0:2]),
+		Cols: binary.LittleEndian.Uint16(buf[2:4]),
+		X:    binary.LittleEndian.Uint16(buf[4:6]),
+		Y:    binary.LittleEndian.Uint16(buf[6:8]),
+	}
+	if ws.Rows == 0 || ws.Cols == 0 {
+		return
+	}
+	_, _, _ = syscall.Syscall(syscall.SYS_IOCTL, master.Fd(), syscall.TIOCSWINSZ, uintptr(unsafe.Pointer(&ws)))
 }
 
 func (w winsize) String() string {

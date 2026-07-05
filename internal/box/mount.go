@@ -2,6 +2,7 @@ package box
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -66,6 +67,9 @@ func buildRoot(d Directives) (string, error) {
 		if err := bindCred(root, m); err != nil {
 			return "", err
 		}
+	}
+	if err := installAgentTrampoline(root); err != nil {
+		return "", fmt.Errorf("copy agent trampoline: %w", err)
 	}
 	if err := pivot(root); err != nil {
 		return "", err
@@ -269,6 +273,27 @@ func touch(path string, mode os.FileMode) error {
 		return err
 	}
 	return f.Close()
+}
+
+func installAgentTrampoline(root string) error {
+	src, err := os.Open("/proc/self/exe")
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dstPath := filepath.Join(root, agentTrampolinePath)
+	dst, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0500)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		return err
+	}
+	if err := dst.Close(); err != nil {
+		return err
+	}
+	return os.Chmod(dstPath, 0500)
 }
 
 func pivot(root string) error {
