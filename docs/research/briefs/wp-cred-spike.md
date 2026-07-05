@@ -1,0 +1,30 @@
+You are a systems engineer running a focused, MINIMAL feasibility spike on THIS box to settle whether the core architecture of a tool called "cove" is buildable. This is the single make-or-break question. Be empirical: run real commands, capture real evidence, give a clear pass/fail. Keep it minimal — do NOT build a product, do NOT build the fat 6GB image. Small throwaway scripts only. Clean up temp files. You have passwordless sudo and rootless podman is already installed and working.
+
+THE MACHINE: ARM64 Ubuntu 24.04 KVM guest, no /dev/kvm. Installed: claude (Claude Code CLI), codex (Codex CLI), tmux, git, gh, podman (rootless works), go is NOT installed (install it if you need it, or use python3 for the throwaway proxy — your choice; a tiny proxy in python3 is fine for a spike).
+
+THE ARCHITECTURE TO VALIDATE: cove will run coding agents in YOLO mode inside a rootless-podman container whose ONLY network exit is a host-side proxy. The proxy does two things: (1) CREDENTIAL INJECTION — the agent's environment holds only DUMMY credentials; the proxy holds the real ones and injects the real auth header on the way out, so the agent process never possesses your real keys/tokens; (2) EGRESS ALLOWLIST — deny-by-default, only whitelisted domains pass. The whole bet dies if the agents' real auth flows can't be routed + injected through such a proxy.
+
+CRITICAL SECURITY RULE for this spike: the owner's REAL credentials live in ~/.claude.json and ~/.codex/auth.json. You may read them ONLY to inject into the proxy in-memory. NEVER print full tokens/keys to your output (redact to first/last 4 chars). NEVER write real credentials to any file. Do not exfiltrate anything.
+
+=== PART 1: Claude Code credential injection ===
+First, determine how `claude` authenticates: inspect ~/.claude.json and env for whether it uses an OAuth token (e.g. a stored oauth access token / CLAUDE_CODE_OAUTH_TOKEN) or a raw ANTHROPIC_API_KEY. Report the auth MODE (redacted).
+Then test the injection model:
+1. Stand up a tiny local reverse proxy (python3 http.server / aiohttp / or a 50-line Go program) listening on http://127.0.0.1:PORT. It should: log each incoming request's method, host, path, and the shape of the Authorization/x-api-key headers (REDACTED); replace the auth header with the REAL Claude credential (read from the owner's config, held only in the proxy's memory); forward to the real upstream (https://api.anthropic.com) over TLS; stream the response back.
+2. Run `claude` in an environment that has NO real credential of its own — e.g. a temp HOME with a ~/.claude.json containing only a DUMMY token, and ANTHROPIC_BASE_URL=http://127.0.0.1:PORT (and ANTHROPIC_API_KEY=dummy if needed) — and issue a one-shot prompt: `claude -p "reply with the single word: ok"` (use --dangerously-skip-permissions if needed to avoid prompts).
+3. OBSERVE and report: Did claude route its request through the proxy? What endpoint/host/path and auth-header shape did it send? Did the proxy successfully inject the real credential and get a 200 with a real completion back to claude? OR did claude refuse to start/authenticate without a real token, or bypass the base URL, or send something the proxy couldn't fix? 
+VERDICT PART 1: Can Claude Code run with only a dummy cred in its env while a proxy injects the real one? PASS / PARTIAL / FAIL, with the evidence.
+
+=== PART 2: Codex credential injection ===
+Same investigation for `codex`. First determine its auth mode from ~/.codex/auth.json and config (~/.codex/config.toml) — is it a ChatGPT-login OAuth token or an OPENAI_API_KEY? What host does ChatGPT-auth codex actually talk to (it may NOT be api.openai.com — it may be a ChatGPT backend endpoint), and does it honor OPENAI_BASE_URL or a config model_providers base_url override?
+Then attempt the same injection test: dummy cred in codex's env/config, base URL pointed at your proxy, proxy injects the real auth and forwards to whatever the real upstream host is. Run a one-shot: `codex exec -s danger-full-access "reply with the single word: ok"` (or read-only sandbox) through the proxy.
+VERDICT PART 2: Can Codex run with only a dummy cred while a proxy injects the real one? PASS / PARTIAL / FAIL. If ChatGPT-auth codex cannot be cleanly proxied (e.g. non-standard endpoint, bound token), say so plainly — that is a critical finding.
+
+=== PART 3: Egress socket-bridge (independent of agents) ===
+Validate the deny-by-default egress mechanism the design depends on, using rootless podman + a tiny alpine/busybox container (NOT the agents):
+1. Start a host-side HTTP CONNECT forward proxy with a domain ALLOWLIST (allow e.g. github.com; deny everything else), listening on a unix socket /run/user/$(id -u)/cove-proxy.sock (or a tcp port you then bridge).
+2. Run a container with `--network=none`, bind-mount the socket in, and inside bridge 127.0.0.1:3128 -> the unix socket with socat (install socat in the container or use an image that has it). Set HTTP_PROXY/HTTPS_PROXY=http://127.0.0.1:3128.
+3. From inside the container: `curl -sS https://github.com` (ALLOWED — should succeed) and `curl -sS https://example.com` (DENIED — should fail/refuse), and confirm there is NO direct egress bypassing the proxy (e.g. curl --noproxy to a raw IP should fail because --network=none).
+VERDICT PART 3: Does the `--network=none` + unix-socket + socat + CONNECT-allowlist pattern give real deny-by-default egress with a working allowlist? PASS / PARTIAL / FAIL, with the curl evidence.
+
+=== OUTPUT ===
+A tight report: the auth MODE of each agent (redacted), the three VERDICTS with concrete evidence (captured request lines, curl results), and a BOTTOM LINE: does the cove credential-proxy + egress architecture survive contact with the owner's actual claude+codex auth? If credential injection works for one agent but not the other, say exactly which and why. If it fails, explain what WOULD work (e.g. scoped API key instead of OAuth, or a different interception point). Clean up all temp files and any temp HOME dirs. Confirm no real credentials were written to disk or printed.
