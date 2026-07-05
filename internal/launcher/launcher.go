@@ -2,10 +2,13 @@ package launcher
 
 import (
 	"bufio"
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -18,6 +21,7 @@ import (
 
 	"cove/internal/box"
 	"cove/internal/config"
+	"cove/internal/version"
 )
 
 type Opts struct {
@@ -50,15 +54,16 @@ func Run(cfg *config.Config, opts Opts) (int, error) {
 	if err := sweepRoots(false); err != nil && opts.Verbose {
 		fmt.Fprintf(os.Stderr, "cove: cleanup warning: %v\n", err)
 	}
-	dummy, cleanupProxy, err := dummyProxySocket()
+	control, sessionSock, err := ensureProxySession(opts.AgentArgv[0])
 	if err != nil {
-		return 69, err
+		return 69, ExitError{Code: 69, Msg: "cove proxy unavailable: " + err.Error()}
 	}
-	defer cleanupProxy()
-	d, err := buildDirectives(cfg, opts, project, dummy)
+	defer control.Close()
+	d, err := buildDirectives(cfg, opts, project, sessionSock)
 	if err != nil {
 		return 78, err
 	}
+	d.ProxyEnabled = true
 	code, err := spawnInit(d, opts.Verbose)
 	return code, err
 }
@@ -239,29 +244,118 @@ func spawnInit(d box.Directives, verbose bool) (int, error) {
 	return 1, err
 }
 
-func dummyProxySocket() (string, func(), error) {
-	path := filepath.Join(os.TempDir(), fmt.Sprintf("cove-dummy-proxy.%d.sock", os.Getpid()))
-	_ = os.Remove(path)
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		return "", func() {}, err
-	}
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			_ = c.Close()
+func ensureProxySession(agentPath string) (net.Conn, string, error) {
+	sock := filepath.Join(config.StateDir(), "proxyd.sock")
+	if err := pingProxy(sock); err != nil {
+		_ = os.Remove(sock)
+		if err := spawnProxy(); err != nil {
+			return nil, "", err
 		}
-	}()
-	return path, func() {
-		_ = ln.Close()
-		<-done
-		_ = os.Remove(path)
-	}, nil
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			if err := pingProxy(sock); err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				return nil, "", fmt.Errorf("PING timed out")
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	c, err := net.DialTimeout("unix", sock, 250*time.Millisecond)
+	if err != nil {
+		return nil, "", err
+	}
+	sessionID, err := newSessionID()
+	if err != nil {
+		_ = c.Close()
+		return nil, "", err
+	}
+	agent := filepath.Base(agentPath)
+	if agent == "" || agent == "." || agent == string(filepath.Separator) {
+		agent = "agent"
+	}
+	if _, err := fmt.Fprintf(c, "REGISTER %s %s\n", sessionID, sanitizeAgent(agent)); err != nil {
+		_ = c.Close()
+		return nil, "", err
+	}
+	line, err := bufio.NewReader(c).ReadString('\n')
+	if err != nil {
+		_ = c.Close()
+		return nil, "", err
+	}
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "OK ") {
+		_ = c.Close()
+		return nil, "", errors.New(line)
+	}
+	return c, strings.TrimSpace(strings.TrimPrefix(line, "OK ")), nil
+}
+
+func pingProxy(sock string) error {
+	c, err := net.DialTimeout("unix", sock, 250*time.Millisecond)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if _, err := io.WriteString(c, "PING\n"); err != nil {
+		return err
+	}
+	_ = c.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	line, err := bufio.NewReader(c).ReadString('\n')
+	if err != nil {
+		return err
+	}
+	line = strings.TrimSpace(line)
+	want := "PONG " + version.Version
+	if line != want {
+		return fmt.Errorf("bad proxy health response %q", line)
+	}
+	return nil
+}
+
+func spawnProxy() error {
+	if err := os.MkdirAll(config.StateDir(), 0700); err != nil {
+		return err
+	}
+	logPath := filepath.Join(config.StateDir(), "proxyd.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+	null, err := os.OpenFile("/dev/null", os.O_RDONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer null.Close()
+	cmd := exec.Command("/proc/self/exe", "proxyd")
+	cmd.Stdin = null
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	return cmd.Start()
+}
+
+func newSessionID() (string, error) {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+func sanitizeAgent(agent string) string {
+	agent = strings.Map(func(r rune) rune {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			return '_'
+		}
+		return r
+	}, agent)
+	if agent == "" {
+		return "agent"
+	}
+	return agent
 }
 
 func parseCredMounts(entries []string) ([]box.CredMount, error) {

@@ -2,7 +2,12 @@ package proxy
 
 import (
 	"bufio"
+	"context"
+	"fmt"
+	"io"
 	"net"
+	"strconv"
+	"strings"
 	"time"
 
 	"cove/internal/secret"
@@ -25,7 +30,186 @@ type Target struct {
 	Port int
 }
 
-type Proxyd struct{}
-type Matcher struct{}
+type Matcher struct {
+	rules []compiledRule
+}
 type CA struct{}
-type AuditWriter struct{}
+
+func (c *Conn) handle() {
+	defer c.raw.Close()
+	line, err := c.br.ReadString('\n')
+	if err != nil {
+		c.deny(Target{}, 400, "malformed CONNECT")
+		return
+	}
+	line = strings.TrimRight(line, "\r\n")
+	parts := strings.Fields(line)
+	if len(parts) < 3 {
+		c.deny(Target{}, 400, "malformed CONNECT")
+		return
+	}
+	if parts[0] != "CONNECT" {
+		c.writeResponse(405, "Method Not Allowed", "plain HTTP proxying is not supported\n")
+		c.auditDeny(Target{Host: parts[1], Port: 80}, 405)
+		return
+	}
+	t, err := parseTarget(parts[1])
+	if err != nil {
+		c.deny(Target{}, 400, "bad CONNECT target")
+		return
+	}
+	for {
+		h, err := c.br.ReadString('\n')
+		if err != nil {
+			c.deny(t, 400, "malformed CONNECT headers")
+			return
+		}
+		if h == "\r\n" || h == "\n" {
+			break
+		}
+	}
+	policy, _ := c.matcher.Match(t.Host, t.Port)
+	if policy == PolicyDeny {
+		c.deny(t, 403, "denied by cove policy\n")
+		return
+	}
+	if err := c.tunnel(t, policy); err != nil {
+		fmt.Fprintf(c.proxy.log, "cove proxyd: tunnel %s:%d: %v\n", t.Host, t.Port, err)
+	}
+}
+
+func parseTarget(s string) (Target, error) {
+	host, portText, err := net.SplitHostPort(s)
+	if err != nil {
+		return Target{}, err
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 || port > 65535 {
+		return Target{}, fmt.Errorf("bad port")
+	}
+	return Target{Host: strings.ToLower(strings.Trim(host, "[]")), Port: port}, nil
+}
+
+func (c *Conn) tunnel(t Target, policy Policy) error {
+	upstream, err := c.proxy.dialAllowed(t)
+	if err != nil {
+		c.deny(t, 502, "upstream unavailable\n")
+		return err
+	}
+	defer upstream.Close()
+	if _, err := io.WriteString(c.raw, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		return err
+	}
+	start := time.Now()
+	upDone := make(chan copyResult, 1)
+	downDone := make(chan copyResult, 1)
+	go func() {
+		n, err := io.Copy(upstream, c.br)
+		closeWrite(upstream)
+		upDone <- copyResult{n: n, err: err}
+	}()
+	go func() {
+		n, err := io.Copy(c.raw, upstream)
+		closeWrite(c.raw)
+		downDone <- copyResult{n: n, err: err}
+	}()
+	up := <-upDone
+	down := <-downDone
+	pol := "allow"
+	c.emit(&AuditRecord{
+		TS:      time.Now().UTC(),
+		Session: c.sess.ID,
+		Policy:  pol,
+		Host:    t.Host,
+		Port:    t.Port,
+		Method:  "-",
+		Path:    "-",
+		BytesUp: up.n,
+		BytesDn: down.n,
+		DurMS:   time.Since(start).Milliseconds(),
+		Agent:   c.sess.Agent,
+	})
+	if up.err != nil && !isClosed(up.err) {
+		return up.err
+	}
+	if down.err != nil && !isClosed(down.err) {
+		return down.err
+	}
+	return nil
+}
+
+type copyResult struct {
+	n   int64
+	err error
+}
+
+func closeWrite(c net.Conn) {
+	type closeWriter interface{ CloseWrite() error }
+	if cw, ok := c.(closeWriter); ok {
+		_ = cw.CloseWrite()
+		return
+	}
+	_ = c.Close()
+}
+
+func isClosed(err error) bool {
+	if err == nil {
+		return true
+	}
+	s := err.Error()
+	return strings.Contains(s, "closed") || strings.Contains(s, "reset by peer") || err == io.EOF
+}
+
+func (c *Conn) deny(t Target, status int, body string) {
+	text := "Forbidden"
+	if status == 400 {
+		text = "Bad Request"
+	} else if status == 502 {
+		text = "Bad Gateway"
+	}
+	c.writeResponse(status, text, body)
+	c.auditDeny(t, status)
+}
+
+func (c *Conn) writeResponse(status int, text, body string) {
+	_, _ = fmt.Fprintf(c.raw, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", status, text, len(body), body)
+}
+
+func (c *Conn) auditDeny(t Target, status int) {
+	c.emit(&AuditRecord{
+		TS:      time.Now().UTC(),
+		Session: c.sess.ID,
+		Policy:  "deny",
+		Host:    t.Host,
+		Port:    t.Port,
+		Method:  "-",
+		Path:    "-",
+		Status:  status,
+		Agent:   c.sess.Agent,
+	})
+}
+
+func (c *Conn) emit(rec *AuditRecord) {
+	if c.audit != nil {
+		c.audit.Emit(rec)
+	}
+}
+
+func (p *Proxyd) dialAllowed(t Target) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	host := t.Host
+	ip := net.ParseIP(host)
+	if ip == nil {
+		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		if len(addrs) == 0 {
+			return nil, fmt.Errorf("no DNS addresses")
+		}
+		ip = addrs[0].IP
+	}
+	d := net.Dialer{Timeout: 10 * time.Second}
+	return d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(t.Port)))
+}

@@ -12,9 +12,8 @@ import (
 	"cove/internal/logcmd"
 	"cove/internal/proxy"
 	"cove/internal/setup"
+	"cove/internal/version"
 )
-
-const version = "0.1.0-m3-dev"
 
 func main() {
 	os.Exit(run(os.Args))
@@ -89,7 +88,7 @@ func launcherMain(args []string) int {
 		return 0
 	}
 	if *versionFlag {
-		fmt.Printf("cove %s\n", version)
+		fmt.Printf("cove %s\n", version.Version)
 		return 0
 	}
 	if split < 0 {
@@ -112,7 +111,7 @@ func launcherMain(args []string) int {
 		Verbose:   *verbose,
 		DryRun:    *dryRun,
 		AgentArgv: agentArgs,
-		Version:   version,
+		Version:   version.Version,
 	})
 	if err != nil {
 		var exitErr launcher.ExitError
