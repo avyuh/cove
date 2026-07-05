@@ -1,1 +1,4 @@
-.private/
+/bin/
+/dist/
+/cove
+*.test

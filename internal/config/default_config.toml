@@ -1,0 +1,88 @@
+[options]
+tmp_size = "256m"
+proxy_port = 8080
+audit = true
+cred_mount = []
+env_passthrough = []
+
+allow = [
+  "chatgpt.com", "auth.openai.com",
+  "accounts.google.com", "oauth2.googleapis.com", "cloudcode-pa.googleapis.com",
+  "github.com", "api.github.com", "codeload.github.com", "*.githubusercontent.com",
+  "dash.cloudflare.com",
+  "sts.amazonaws.com", "s3.amazonaws.com", "*.s3.amazonaws.com",
+  "registry.npmjs.org", "pypi.org", "files.pythonhosted.org",
+  "proxy.golang.org", "sum.golang.org",
+  "index.crates.io", "static.crates.io",
+  "objects.githubusercontent.com",
+  "cdn-lfs.huggingface.co", "cdn-lfs-us-1.huggingface.co", "cdn-lfs-eu-1.huggingface.co",
+  "*.hf.co",
+]
+
+[[inject]]
+host          = "api.anthropic.com"
+header_name   = "Authorization"
+header_template = "Bearer {secret}"
+secret        = "json:~/.claude/.credentials.json#claudeAiOauth.accessToken"
+mode          = "oauth-refresh"
+dummy_env     = "ANTHROPIC_API_KEY"
+strip_headers = ["x-api-key"]
+base_url_env  = "ANTHROPIC_BASE_URL"
+base_url_value = "https://api.anthropic.com"
+alpn          = "h2"
+
+[[inject]]
+host          = "api.openai.com"
+header_name   = "Authorization"
+header_template = "Bearer {secret}"
+secret        = "file:~/.config/cove/secrets/openai-api-key"
+dummy_env     = "OPENAI_API_KEY"
+strip_headers = ["x-api-key"]
+base_url_env  = "OPENAI_BASE_URL"
+base_url_value = "https://api.openai.com/v1"
+
+[[inject]]
+host          = "api.moonshot.cn"
+header_name   = "Authorization"
+header_template = "Bearer {secret}"
+secret        = "file:~/.config/cove/secrets/kimi-api-key"
+dummy_env     = "KIMI_API_KEY"
+base_url_env  = "KIMI_BASE_URL"
+base_url_value = "http://127.0.0.1:0"
+
+[[inject]]
+host          = "generativelanguage.googleapis.com"
+header_name   = "x-goog-api-key"
+header_template = "{secret}"
+secret        = "file:~/.config/cove/secrets/gemini-api-key"
+dummy_env     = "GEMINI_API_KEY"
+base_url_env  = "GOOGLE_GEMINI_BASE_URL"
+base_url_value = "https://generativelanguage.googleapis.com"
+
+[[inject]]
+host          = "huggingface.co"
+header_name   = "Authorization"
+header_template = "Bearer {secret}"
+secret        = "file:~/.config/cove/secrets/hf-token"
+dummy_env     = "HF_TOKEN"
+
+[[inject]]
+host          = "api.hetzner.cloud"
+header_name   = "Authorization"
+header_template = "Bearer {secret}"
+secret        = "file:~/.config/cove/secrets/hcloud-token"
+dummy_env     = "HCLOUD_TOKEN"
+
+[[inject]]
+host          = "api.cloudflare.com"
+header_name   = "Authorization"
+header_template = "Bearer {secret}"
+secret        = "file:~/.config/cove/secrets/cloudflare-token"
+dummy_env     = "CLOUDFLARE_API_TOKEN"
+
+[[inject]]
+host          = "api.runpod.io"
+header_name   = "Authorization"
+header_template = "Bearer {secret}"
+secret        = "file:~/.config/cove/secrets/runpod-key"
+dummy_env     = "RUNPOD_API_KEY"
