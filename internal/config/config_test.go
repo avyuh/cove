@@ -63,14 +63,50 @@ func TestValidateRejectsBroadCredMountAndEnvPassthrough(t *testing.T) {
 	}{
 		{"cred star", `[options]` + "\n" + `cred_mount = ["*"]`},
 		{"cred tilde", `[options]` + "\n" + `cred_mount = ["~"]`},
+		{"cred tilde slash", `[options]` + "\n" + `cred_mount = ["~/"]`},
 		{"cred root", `[options]` + "\n" + `cred_mount = ["/"]`},
+		{"cred dot", `[options]` + "\n" + `cred_mount = ["."]`},
+		{"cred glob", `[options]` + "\n" + `cred_mount = ["~/.config/*"]`},
+		{"cred bad suffix", `[options]` + "\n" + `cred_mount = ["~/.codex:ro"]`},
 		{"env star", `[options]` + "\n" + `env_passthrough = ["*"]`},
 		{"env tilde", `[options]` + "\n" + `env_passthrough = ["~"]`},
 		{"env root", `[options]` + "\n" + `env_passthrough = ["/"]`},
+		{"env empty", `[options]` + "\n" + `env_passthrough = [""]`},
+		{"env middle glob", `[options]` + "\n" + `env_passthrough = ["AWS_*_KEY"]`},
+		{"env double glob", `[options]` + "\n" + `env_passthrough = ["AWS_**"]`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := LoadBytes([]byte(tt.body)); err == nil {
+				t.Fatalf("expected rejection")
+			}
+		})
+	}
+}
+
+func TestValidateAcceptsEnvPassthroughTrailingGlobAndCredRWSuffix(t *testing.T) {
+	cfg, err := LoadBytes([]byte(`
+[options]
+cred_mount = ["~/.codex:rw"]
+env_passthrough = ["AWS_*", "EXACT_TOKEN"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Options.CredMount) != 1 || len(cfg.Options.EnvPassthrough) != 2 {
+		t.Fatalf("options not retained: %+v", cfg.Options)
+	}
+}
+
+func TestValidateRejectsInvalidWildcardRulesAndPorts(t *testing.T) {
+	for _, body := range []string{
+		`allow = ["api.*.example.com"]`,
+		`allow = ["*."]`,
+		`allow = ["example.com:0"]`,
+		`allow = ["example.com:70000"]`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			if _, err := LoadBytes([]byte(body)); err == nil {
 				t.Fatalf("expected rejection")
 			}
 		})

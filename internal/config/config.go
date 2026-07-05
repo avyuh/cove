@@ -297,7 +297,8 @@ func validateCredMounts(entries []string) error {
 		if mode == "rw" && path == "" {
 			return fmt.Errorf("cred_mount %q missing path", e)
 		}
-		if path == "" || path == "*" || path == "~" || path == "/" || strings.Contains(path, "*") {
+		clean := filepath.Clean(path)
+		if path == "" || path == "*" || clean == "." || clean == "~" || clean == "/" || strings.Contains(path, "*") {
 			return fmt.Errorf("cred_mount %q is too broad", e)
 		}
 	}

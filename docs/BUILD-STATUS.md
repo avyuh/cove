@@ -56,8 +56,8 @@ F streaming, G error paths). Rules:
 | M2 | The box, no proxy: namespaces, full mount plan, pivot_root, cap-drop, lo-up, pty, exec shell | §3.1–3.6, §9/M2, §13.1–13.3 | `cove -- sh -c 'cat ~/.ssh/id_rsa'` → absent; `ls /work` shows project; `curl https://1.1.1.1` → ENETUNREACH; interactive `cove -- bash` with TTY; `/proc` shows only in-box PIDs, PID 1 = cove-init (e2e §15.2 steps 1–3, minus proxy deny) | DONE |
 | M3 | Minimal allow-only proxy (Unix accept, CONNECT parse, allowlist, opaque tunnel, host DNS, audit) — **first milestone that beats bare YOLO** | §4.1–4.4, §4.6, §4.9, §9/M3 | `cove -- codex exec 'say ok'` completes via allow hosts (needs `cred_mount ["~/.codex"]`); CONNECT to non-allowed host → 403 + audit deny record; secrets still absent; raw egress still fails | DONE |
 | M4 | **h2 MITM inject (make-or-break, gates the whole inject feature)**: leaf minting, client-facing h2 TLS termination, ReverseProxy strip+inject, FlushInterval=-1, upstream h2 | §4.5, §4.7, §4.8, §9/M4, §14 | `cove -- claude -p "reply with exactly: COVE-OK"` → real streamed 200 through MITM+inject over h2, token host-side only, box holds dummy `ANTHROPIC_API_KEY` (dummy `x-api-key` stripped); audit shows `POST /v1/messages` status 200; if h2 misbehaves, prove `alpn="http/1.1"` downgrade (e2e step 4) | DONE |
-| M5 | Interactive polish: signal forwarding, SIGWINCH resize via control pipe, termios save/restore, exit-code propagation, cap-drop verified | §3.4–3.5, §6.1, §9/M5, §13.2 steps 12a–13 | `cove -- claude` TUI resizes on window change; Ctrl-C hits the agent not the launcher; exit codes match bare runs (incl. status-pipe/75 disambiguation); agent has empty cap bounding set + no_new_privs | IN PROGRESS |
-| M6 | Full proxy/config: base_url rewrites, kimi plain-HTTP loopback, cred_mount/env_passthrough, all seed stanzas, Validate() | §3.7b, §3.8, §5 (all), §9/M6, §12.1 | Kimi flow works via dynamic-port `KIMI_BASE_URL` loopback with injected key; each seed inject stanza round-trips against a stub upstream; config with host in both allow+inject fails to load; embedded seed passes `Validate()` (§15.1 B1 test) | TODO |
+| M5 | Interactive polish: signal forwarding, SIGWINCH resize via control pipe, termios save/restore, exit-code propagation, cap-drop verified | §3.4–3.5, §6.1, §9/M5, §13.2 steps 12a–13 | `cove -- claude` TUI resizes on window change; Ctrl-C hits the agent not the launcher; exit codes match bare runs (incl. status-pipe/75 disambiguation); agent has empty cap bounding set + no_new_privs | DONE |
+| M6 | Full proxy/config: base_url rewrites, kimi plain-HTTP loopback, cred_mount/env_passthrough, all seed stanzas, Validate() | §3.7b, §3.8, §5 (all), §9/M6, §12.1 | Kimi flow works via dynamic-port `KIMI_BASE_URL` loopback with injected key; each seed inject stanza round-trips against a stub upstream; config with host in both allow+inject fails to load; embedded seed passes `Validate()` (§15.1 B1 test) | IN PROGRESS |
 | M7 | Lifecycle/robustness: auto-spawn + PING/PONG, flock singleton, SIGHUP reload, per-session sockets/REGISTER, crash sweep, fail-closed, audit rotation | §3.9, §4.1, §4.10, §9/M7 | Kill proxy mid-session → egress fails closed; next run auto-spawns fresh proxy; 20 concurrent sessions all proxy correctly (20/20 200s); no leaked `/tmp/cove-root.*` or `sessions/*.sock` after `kill -9` of a launcher | TODO |
 | M8 | `cove log` verb + docs/positioning copy | §6.4, §8.4, §9/M8 | `cove log --follow --deny-only` shows denials live; filters (`--session`, `--host`) work; NO string anywhere says "secure sandbox" | TODO |
 
@@ -189,6 +189,21 @@ Planned order: **M4 → M5 → M6 → M7 → M8** (straight §9 order). Notes:
   termios restore on all exit paths, exit-code propagation (70-vs-75 preserved),
   fold in §13.2 step-13 belt no_new_privs/capset re-assert + fd hygiene (N7);
   automated B caps test + pty/signal/exit-code tests.
+- 2026-07-05 — M5 — DONE — pty/signals/exit-codes + step-13 caps belt. Reviewer
+  QC PASS: cap-drop made DETERMINISTIC via a `cove __agent` re-exec trampoline
+  (fixes a thread-luck no_new_privs issue); agent + PID1 caps all zero +
+  NoNewPrivs:1, sabotage-verified fail-closed in e2e-box.sh B3; fd hygiene,
+  session-leadership, group-signal forwarding, termios-restore, and the exit-code
+  table all verified live; 17/17 e2e; no regressions; no new deps. Committed
+  locally (no push). Carry-forward minors → M7: (1) trampoline copies the ~11MB
+  binary to tmpfs per launch → exec /proc/self/exe __agent instead (efficiency);
+  (2) sweepRoots 24h→active-mountpoint; (3) /proc/1/comm cosmetic label.
+- 2026-07-05 — M6 — IN PROGRESS — dispatched codex work-order: kimi plain-HTTP
+  loopback (§3.7b, dynamic port → CONNECT→inject) as the core new piece; complete
+  cred_mount (:ro default/:rw, launch warning) + env_passthrough + base_url/dummy
+  env across all seed stanzas; verify Validate(); tests = full config/secret A
+  tables + each seed inject stanza round-trips vs a stub upstream + kimi/codex
+  E2E + negative-config. Carry-forwards logged for M7.
 - 2026-07-05 — M0–M3 TEST-BACKFILL — DONE — added repeatable TESTPLAN A unit
   tables plus `scripts/e2e-box.sh` for B/E/G; `go build ./...`, `go vet ./...`,
   `go test ./... -count=1`, and `bash scripts/e2e-box.sh` passed. Deferred

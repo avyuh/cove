@@ -1,8 +1,10 @@
 package launcher
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"cove/internal/config"
@@ -57,10 +59,23 @@ func TestParseCredMounts(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(home, "relative", "creds"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	mounts, err := parseCredMounts([]string{"~/.config/gh", "relative/creds:rw"})
+	oldStderr := os.Stderr
+	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
+	os.Stderr = stderrW
+	mounts, err := parseCredMounts([]string{"~/.config/gh", "relative/creds:rw"})
+	_ = stderrW.Close()
+	os.Stderr = oldStderr
+	if err != nil {
+		t.Fatal(err)
+	}
+	warningBytes, err := io.ReadAll(stderrR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warning := string(warningBytes)
 	if len(mounts) != 2 {
 		t.Fatalf("mounts len = %d, want 2", len(mounts))
 	}
@@ -70,8 +85,62 @@ func TestParseCredMounts(t *testing.T) {
 	if mounts[1].Source != filepath.Join(home, "relative", "creds") || mounts[1].Rel != filepath.Join("relative", "creds") || !mounts[1].RW {
 		t.Fatalf("bad second mount: %+v", mounts[1])
 	}
+	if !strings.Contains(warning, "~/.config/gh") || !strings.Contains(warning, "read-only") {
+		t.Fatalf("read-only warning missing cred_mount and mode: %q", warning)
+	}
+	if !strings.Contains(warning, "relative/creds:rw") || !strings.Contains(warning, "read-write") {
+		t.Fatalf("read-write warning missing cred_mount and mode: %q", warning)
+	}
 	if _, err := parseCredMounts([]string{filepath.Dir(home)}); err == nil {
 		t.Fatalf("expected outside-HOME cred_mount rejection")
+	}
+}
+
+func TestBuildDirectivesCopiesEnvPassthroughAndInjectTargets(t *testing.T) {
+	cfgHome := t.TempDir()
+	cfgDir := filepath.Join(cfgHome, "cove")
+	if err := os.MkdirAll(cfgDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "ca.pem"), []byte("test-ca\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("AZURE_TOKEN", "nope")
+	t.Setenv("EXACT_TOKEN", "exact")
+	cfg, err := config.LoadBytes([]byte(`
+[options]
+env_passthrough = ["AWS_*", "EXACT_TOKEN"]
+
+[[inject]]
+host = "api.example.com:9443"
+header_name = "Authorization"
+header_template = "Bearer {secret}"
+secret = "env:TOKEN"
+dummy_env = "EXAMPLE_API_KEY"
+base_url_env = "EXAMPLE_BASE_URL"
+base_url_value = "https://api.example.com"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := buildDirectives(cfg, Opts{AgentArgv: []string{"/bin/true"}}, t.TempDir(), "/tmp/proxy.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.EnvPassthrough["AWS_REGION"] != "us-east-1" || d.EnvPassthrough["AWS_SECRET_ACCESS_KEY"] != "secret" || d.EnvPassthrough["EXACT_TOKEN"] != "exact" {
+		t.Fatalf("env passthrough missing values: %+v", d.EnvPassthrough)
+	}
+	if _, ok := d.EnvPassthrough["AZURE_TOKEN"]; ok {
+		t.Fatalf("non-matching env var was copied: %+v", d.EnvPassthrough)
+	}
+	if len(d.Inject) != 1 {
+		t.Fatalf("inject directives = %d, want 1", len(d.Inject))
+	}
+	if d.Inject[0].Host != "api.example.com" || d.Inject[0].Port != 9443 {
+		t.Fatalf("inject target = %s:%d, want api.example.com:9443", d.Inject[0].Host, d.Inject[0].Port)
 	}
 }
 

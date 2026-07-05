@@ -31,6 +31,8 @@ type Directives struct {
 }
 
 type InjectDirective struct {
+	Host         string
+	Port         int
 	DummyEnv     string
 	DummyValue   string
 	BaseURLEnv   string
@@ -79,6 +81,12 @@ func InitMain() int {
 			writeStatus(statusFD, "ERR shim "+err.Error())
 			return 75
 		}
+		stopLoopbacks, err := startBaseURLLoopbacks(&d)
+		if err != nil {
+			writeStatus(statusFD, "ERR base-url "+err.Error())
+			return 75
+		}
+		defer stopLoopbacks()
 	}
 	code, err := runAgent(d, statusFD, root)
 	if err != nil {

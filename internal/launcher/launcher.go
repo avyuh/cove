@@ -100,7 +100,15 @@ func buildDirectives(cfg *config.Config, opts Opts, project, proxySock string) (
 	bundle = append(bundle, ca...)
 	inject := make([]box.InjectDirective, 0, len(cfg.Inject))
 	for _, st := range cfg.Inject {
+		host := st.Host
+		port := st.Port
+		if r, err := config.ParseRule(st.Host); err == nil {
+			host = r.Host
+			port = r.Port
+		}
 		inject = append(inject, box.InjectDirective{
+			Host:         host,
+			Port:         port,
 			DummyEnv:     st.DummyEnv,
 			DummyValue:   st.DummyValue,
 			BaseURLEnv:   st.BaseURLEnv,

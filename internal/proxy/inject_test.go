@@ -30,7 +30,7 @@ import (
 func TestInjectStripThenInjectH2H1InertAndStreaming(t *testing.T) {
 	const host = "api.test"
 	coveCA, covePEM, _ := newTestCA(t)
-	upstreamCA, upstreamPEM, _ := newTestCA(t)
+	upstreamCA, upstreamPEM := sharedUpstreamTestCA(t)
 	rootPath := filepath.Join(t.TempDir(), "upstream-root.pem")
 	if err := os.WriteFile(rootPath, upstreamPEM, 0644); err != nil {
 		t.Fatal(err)
@@ -217,6 +217,94 @@ func TestInjectStripThenInjectH2H1InertAndStreaming(t *testing.T) {
 	})
 }
 
+func TestSeedInjectStanzasRoundTripToStubUpstreams(t *testing.T) {
+	coveCA, covePEM, _ := newTestCA(t)
+	upstreamCA, upstreamPEM := sharedUpstreamTestCA(t)
+	rootPath := filepath.Join(t.TempDir(), "upstream-root.pem")
+	if err := os.WriteFile(rootPath, upstreamPEM, 0644); err != nil {
+		t.Fatal(err)
+	}
+	emptyCertDir := filepath.Join(t.TempDir(), "empty-certs")
+	if err := os.Mkdir(emptyCertDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSL_CERT_FILE", rootPath)
+	t.Setenv("SSL_CERT_DIR", emptyCertDir)
+
+	seed, err := config.LoadBytes([]byte(config.DefaultConfig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range seed.Inject {
+		st := st
+		rule, err := config.ParseRule(st.Host)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Run(st.Host, func(t *testing.T) {
+			secretValue := "seed-secret-" + strings.ReplaceAll(rule.Host, ".", "-")
+			var captured atomic.Value
+			upstream := newInjectUpstream(t, upstreamCA, rule.Host, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				headers := map[string]string{
+					"method": r.Method,
+					"path":   r.URL.RequestURI(),
+					"inject": r.Header.Get(st.HeaderName),
+				}
+				for _, h := range st.StripHeaders {
+					headers["strip:"+strings.ToLower(h)] = r.Header.Get(h)
+				}
+				captured.Store(headers)
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, "seed-ok")
+			}))
+			defer upstream.Close()
+
+			st.Host = net.JoinHostPort(rule.Host, strconv.Itoa(serverPort(t, upstream.URL)))
+			secretPath := writeSecret(t, secretValue)
+			st.Secret = "file:" + secretPath
+			cfg := &config.Config{Inject: []config.InjectStanza{st}}
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			headers := http.Header{}
+			for _, h := range st.StripHeaders {
+				headers.Set(h, "client-dummy")
+			}
+			resp, body, cleanup := requestThroughInjectConfig(t, cfg, injectRequest{
+				Leg:       st.ALPN,
+				Host:      rule.Host,
+				Port:      serverPort(t, upstream.URL),
+				Path:      "/seed/check?provider=" + url.QueryEscape(rule.Host),
+				Body:      "seed-body",
+				CoveCA:    coveCA,
+				CoveCAPEM: covePEM,
+				Headers:   headers,
+			})
+			cleanup()
+			if resp.StatusCode != http.StatusCreated || string(body) != "seed-ok" {
+				t.Fatalf("status/body = %d %q, want 201 seed-ok", resp.StatusCode, body)
+			}
+			gotAny := captured.Load()
+			if gotAny == nil {
+				t.Fatal("upstream did not receive request")
+			}
+			got := gotAny.(map[string]string)
+			wantHeader := strings.ReplaceAll(st.HeaderTemplate, "{secret}", secretValue)
+			if got["inject"] != wantHeader {
+				t.Fatalf("%s = %q, want %q", st.HeaderName, got["inject"], wantHeader)
+			}
+			for _, h := range st.StripHeaders {
+				if got["strip:"+strings.ToLower(h)] != "" {
+					t.Fatalf("strip header %s leaked upstream as %q", h, got["strip:"+strings.ToLower(h)])
+				}
+			}
+			if got["method"] != http.MethodPost || !strings.HasPrefix(got["path"], "/seed/check?") {
+				t.Fatalf("unexpected upstream request: %+v", got)
+			}
+		})
+	}
+}
+
 func TestBufConnDrainsBufferedBytesBeforeRawConn(t *testing.T) {
 	rawR, rawW := net.Pipe()
 	defer rawR.Close()
@@ -346,6 +434,22 @@ func requestThroughInject(t *testing.T, req injectRequest) (*http.Response, []by
 func openInjectResponse(t *testing.T, req injectRequest) (*http.Response, func()) {
 	t.Helper()
 	cfg := injectConfig(t, req.Host, req.Port, req.SecretRef, req.Leg)
+	return openInjectResponseWithConfig(t, cfg, req)
+}
+
+func requestThroughInjectConfig(t *testing.T, cfg *config.Config, req injectRequest) (*http.Response, []byte, func()) {
+	t.Helper()
+	resp, cleanup := openInjectResponseWithConfig(t, cfg, req)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		cleanup()
+		t.Fatal(err)
+	}
+	return resp, body, cleanup
+}
+
+func openInjectResponseWithConfig(t *testing.T, cfg *config.Config, req injectRequest) (*http.Response, func()) {
+	t.Helper()
 	client, server := net.Pipe()
 	p := &Proxyd{
 		log: io.Discard,

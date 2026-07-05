@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -78,6 +79,42 @@ func newTestCA(t *testing.T) (*CA, []byte, []byte) {
 		t.Fatal(err)
 	}
 	return ca, certPEM, keyPEM
+}
+
+var sharedUpstreamCA struct {
+	once sync.Once
+	ca   *CA
+	pem  []byte
+	err  error
+}
+
+func sharedUpstreamTestCA(t *testing.T) (*CA, []byte) {
+	t.Helper()
+	sharedUpstreamCA.once.Do(func() {
+		certPEM, keyPEM := generateTestCAPEM(t)
+		dir := t.TempDir()
+		certPath := filepath.Join(dir, "ca.pem")
+		keyPath := filepath.Join(dir, "ca-key.pem")
+		if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
+			sharedUpstreamCA.err = err
+			return
+		}
+		if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+			sharedUpstreamCA.err = err
+			return
+		}
+		ca, err := LoadCA(certPath, keyPath)
+		if err != nil {
+			sharedUpstreamCA.err = err
+			return
+		}
+		sharedUpstreamCA.ca = ca
+		sharedUpstreamCA.pem = certPEM
+	})
+	if sharedUpstreamCA.err != nil {
+		t.Fatal(sharedUpstreamCA.err)
+	}
+	return sharedUpstreamCA.ca, sharedUpstreamCA.pem
 }
 
 func generateTestCAPEM(t *testing.T) ([]byte, []byte) {
