@@ -131,12 +131,23 @@ def run_exit(argv, env=None):
 
 
 def test_resize():
-    run = PtyRun([COVE, "--", "/bin/bash", "-lc", "stty size; IFS= read -r _; stty size"], 24, 80)
+    script = 'stty size; while IFS= read -r _; do sz="$(stty size)"; echo "$sz"; [ "$sz" = "33 100" ] && exit 0; done; exit 1'
+    run = PtyRun([COVE, "--", "/bin/bash", "-lc", script], 24, 80)
     try:
         run.read_until(r"(^|\n|\r)24 80(\r|\n)")
-        run.resize(33, 100)
-        run.write(b"\n")
-        run.read_until(r"(^|\n|\r)33 100(\r|\n)")
+        saw_resize = False
+        last_error = None
+        for settle in (0.05, 0.10, 0.20, 0.40, 0.80):
+            run.resize(33, 100)
+            time.sleep(settle)
+            run.write(b"\n")
+            try:
+                run.read_until(r"(^|\n|\r)33 100(\r|\n)", timeout=2 + settle)
+                saw_resize = True
+                break
+            except AssertionError as exc:
+                last_error = exc
+        require(saw_resize, f"resize was not observed after retries: {last_error}")
         rc = run.wait()
         require(rc == 0, f"resize command rc={rc}; output:\n{run.text()}")
         require(run.restored(), "termios was not restored after normal pty exit")

@@ -35,6 +35,8 @@ type Matcher struct {
 	rules []compiledRule
 }
 
+var proxyResolver = &net.Resolver{PreferGo: true}
+
 func (c *Conn) handle() {
 	defer c.raw.Close()
 	line, err := c.br.ReadString('\n')
@@ -114,12 +116,12 @@ func (c *Conn) tunnel(t Target, policy Policy) error {
 	upDone := make(chan copyResult, 1)
 	downDone := make(chan copyResult, 1)
 	go func() {
-		n, err := io.Copy(upstream, c.br)
+		n, err := copyPlain(upstream, c.br)
 		closeWrite(upstream)
 		upDone <- copyResult{n: n, err: err}
 	}()
 	go func() {
-		n, err := io.Copy(c.raw, upstream)
+		n, err := copyPlain(c.raw, upstream)
 		closeWrite(c.raw)
 		downDone <- copyResult{n: n, err: err}
 	}()
@@ -151,6 +153,27 @@ func (c *Conn) tunnel(t Target, policy Policy) error {
 type copyResult struct {
 	n   int64
 	err error
+}
+
+func copyPlain(dst io.Writer, src io.Reader) (int64, error) {
+	buf := make([]byte, 32*1024)
+	var total int64
+	for {
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			written, werr := dst.Write(buf[:n])
+			total += int64(written)
+			if werr != nil {
+				return total, werr
+			}
+			if written != n {
+				return total, io.ErrShortWrite
+			}
+		}
+		if rerr != nil {
+			return total, rerr
+		}
+	}
 }
 
 func closeWrite(c net.Conn) {
@@ -243,7 +266,7 @@ func (p *Proxyd) resolveOnce(ctx context.Context, host string) (net.IP, error) {
 	defer cancel()
 	ip := net.ParseIP(host)
 	if ip == nil {
-		lookup := net.DefaultResolver.LookupIPAddr
+		lookup := proxyResolver.LookupIPAddr
 		if p.lookupIP != nil {
 			lookup = p.lookupIP
 		}

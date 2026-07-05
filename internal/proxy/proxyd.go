@@ -61,20 +61,19 @@ func Serve(cfg *config.Config, sockPath string) error {
 	if err := os.MkdirAll(filepath.Join(state, "sessions"), 0700); err != nil {
 		return err
 	}
-	lock, err := os.OpenFile(filepath.Join(state, "proxyd.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	lock, held, err := acquireProxydLock(state)
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if !held {
 		return nil
 	}
+	defer lock.Close()
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	_ = os.Remove(sockPath)
 	sessions := filepath.Join(state, "sessions")
-	old, _ := filepath.Glob(filepath.Join(sessions, "*.sock"))
-	for _, p := range old {
-		_ = os.Remove(p)
+	if err := sweepSessionSockets(sessions); err != nil {
+		return err
 	}
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -199,6 +198,53 @@ func (p *Proxyd) register(control net.Conn, sess Session) {
 	_ = ln.Close()
 	<-done
 	_ = os.Remove(path)
+}
+
+func acquireProxydLock(state string) (*os.File, bool, error) {
+	lock, err := os.OpenFile(filepath.Join(state, "proxyd.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lock.Close()
+		return nil, false, nil
+	}
+	return lock, true, nil
+}
+
+func sweepSessionSockets(dir string) error {
+	old, err := filepath.Glob(filepath.Join(dir, "*.sock"))
+	if err != nil {
+		return err
+	}
+	for _, p := range old {
+		st, err := os.Lstat(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if st.Mode()&os.ModeSocket == 0 {
+			continue
+		}
+		if unixSocketAccepts(p) {
+			continue
+		}
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func unixSocketAccepts(path string) bool {
+	c, err := net.DialTimeout("unix", path, 50*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
 }
 
 func timeNow() time.Time {

@@ -15,7 +15,7 @@ const (
 	agentCtlFD       = 5
 	agentPTYMasterFD = 6
 
-	agentTrampolinePath = "/.cove-agent"
+	agentTrampolinePath = "/proc/self/exe"
 )
 
 func AgentMain(args []string) int {

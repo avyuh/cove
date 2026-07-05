@@ -407,6 +407,75 @@ func TestReloginWarningIsRateLimitedAndRedacted(t *testing.T) {
 	}
 }
 
+func TestInjectOAuthRefresh401PassesThroughAndWarns(t *testing.T) {
+	const host = "api.test"
+	coveCA, covePEM, _ := newTestCA(t)
+	upstreamCA, upstreamPEM := sharedUpstreamTestCA(t)
+	rootPath := filepath.Join(t.TempDir(), "upstream-root.pem")
+	if err := os.WriteFile(rootPath, upstreamPEM, 0644); err != nil {
+		t.Fatal(err)
+	}
+	emptyCertDir := filepath.Join(t.TempDir(), "empty-certs")
+	if err := os.Mkdir(emptyCertDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSL_CERT_FILE", rootPath)
+	t.Setenv("SSL_CERT_DIR", emptyCertDir)
+
+	upstream := newInjectUpstream(t, upstreamCA, host, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, "expired token")
+	}))
+	defer upstream.Close()
+	secretPath := writeSecret(t, "expired-oauth-token")
+	cfg := injectConfig(t, host, serverPort(t, upstream.URL), "file:"+secretPath, "http/1.1")
+	cfg.Inject[0].Mode = "oauth-refresh"
+	auditPath := filepath.Join(t.TempDir(), "audit.log")
+	audit, err := NewAuditWriter(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	resp, body, cleanup := requestThroughInjectConfig(t, cfg, injectRequest{
+		Leg:        "http/1.1",
+		Host:       host,
+		Port:       serverPort(t, upstream.URL),
+		Path:       "/v1/messages",
+		SecretRef:  "file:" + secretPath,
+		CoveCA:     coveCA,
+		CoveCAPEM:  covePEM,
+		ProxyAudit: audit,
+		ProxyLog:   &log,
+	})
+	cleanup()
+	_ = audit.Close()
+	if resp.StatusCode != http.StatusUnauthorized || string(body) != "expired token" {
+		t.Fatalf("status/body = %d %q, want 401 expired token", resp.StatusCode, body)
+	}
+	if strings.Count(log.String(), reloginWarning) != 1 {
+		t.Fatalf("proxyd warning log = %q, want one warning", log.String())
+	}
+	if strings.Contains(log.String(), "expired-oauth-token") {
+		t.Fatalf("secret leaked to proxyd log: %q", log.String())
+	}
+	recs := readAuditRecords(t, auditPath)
+	var sawWarn, sawInject bool
+	for _, rec := range recs {
+		if rec.Policy == "warn" && rec.Level == "warn" && rec.Status == http.StatusUnauthorized && rec.Message == reloginWarning {
+			sawWarn = true
+		}
+		if rec.Policy == "inject" && rec.Status == http.StatusUnauthorized {
+			sawInject = true
+		}
+		if strings.Contains(rec.Message, "expired-oauth-token") {
+			t.Fatalf("secret leaked to audit: %+v", rec)
+		}
+	}
+	if !sawWarn || !sawInject {
+		t.Fatalf("audit records missing warn/inject 401 records: %+v", recs)
+	}
+}
+
 type injectRequest struct {
 	Leg        string
 	Host       string
@@ -418,6 +487,7 @@ type injectRequest struct {
 	CoveCAPEM  []byte
 	Headers    http.Header
 	ProxyAudit *AuditWriter
+	ProxyLog   io.Writer
 }
 
 func requestThroughInject(t *testing.T, req injectRequest) (*http.Response, []byte, func()) {
@@ -452,10 +522,13 @@ func openInjectResponseWithConfig(t *testing.T, cfg *config.Config, req injectRe
 	t.Helper()
 	client, server := net.Pipe()
 	p := &Proxyd{
-		log: io.Discard,
+		log: req.ProxyLog,
 		lookupIP: func(context.Context, string) ([]net.IPAddr, error) {
 			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
 		},
+	}
+	if p.log == nil {
+		p.log = io.Discard
 	}
 	conn := &Conn{
 		raw:     server,

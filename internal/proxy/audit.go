@@ -83,6 +83,8 @@ func (a *AuditWriter) Close() error {
 
 func (a *AuditWriter) rotateLocked() {
 	_ = a.file.Close()
+	a.file = nil
+	_ = os.Remove(a.path + ".5")
 	for i := 4; i >= 1; i-- {
 		_ = os.Rename(a.path+"."+itoaAudit(i), a.path+"."+itoaAudit(i+1))
 	}

@@ -46,6 +46,7 @@ type CredMount struct {
 }
 
 func InitMain() int {
+	setProcessName("cove-init")
 	if os.Getenv("COVE_PROBE_USERNS") == "1" {
 		return 0
 	}
@@ -260,8 +261,5 @@ func startAgentChild(agent string, args []string, env []string, statusFD int, ro
 		Files: files,
 		Sys:   sys,
 	})
-	if err == nil {
-		_ = os.Remove(agentTrampolinePath)
-	}
 	return proc, err
 }

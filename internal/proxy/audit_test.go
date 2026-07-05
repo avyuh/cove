@@ -46,7 +46,7 @@ func TestAuditWriterRotatesAt64MiBAndKeepsFive(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.log")
 	for i := 1; i <= 5; i++ {
-		if err := os.WriteFile(path+"."+itoaAudit(i), []byte{byte('0' + i)}, 0600); err != nil {
+		if err := os.WriteFile(path+"."+itoaAudit(i), []byte("old-"+itoaAudit(i)), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -73,6 +73,28 @@ func TestAuditWriterRotatesAt64MiBAndKeepsFive(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "audit.log.6")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("audit.log.6 exists or stat failed: %v", err)
+	}
+	want := map[string]string{
+		"audit.log.2": "old-1",
+		"audit.log.3": "old-2",
+		"audit.log.4": "old-3",
+		"audit.log.5": "old-4",
+	}
+	for name, body := range want {
+		got, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != body {
+			t.Fatalf("%s = %q, want %q", name, got, body)
+		}
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "audit.log.5"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "old-5") {
+		t.Fatalf("old audit.log.5 survived rotation: %q", got)
 	}
 }
 

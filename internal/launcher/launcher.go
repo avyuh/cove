@@ -449,19 +449,112 @@ func sweepRoots(force bool) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	for _, p := range matches {
+	return sweepRootPaths(matches, force, rootActive)
+}
+
+func sweepRootPaths(paths []string, force bool, active func(string) bool) error {
+	for _, p := range paths {
 		st, err := os.Stat(p)
 		if err != nil {
 			continue
 		}
-		if !force && now.Sub(st.ModTime()) < 24*time.Hour {
+		if !st.IsDir() {
+			continue
+		}
+		if !force && active(filepath.Clean(p)) {
 			continue
 		}
 		_ = syscall.Unmount(p, syscall.MNT_DETACH)
 		_ = os.RemoveAll(p)
 	}
 	return nil
+}
+
+func rootActive(root string) bool {
+	if mountinfoHasMountpoint("/proc/self/mountinfo", root) {
+		return true
+	}
+	return rootHasLiveOwner(root)
+}
+
+func rootHasLiveOwner(root string) bool {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	for _, ent := range entries {
+		if !ent.IsDir() || !allDecimalDigits(ent.Name()) {
+			continue
+		}
+		proc := filepath.Join("/proc", ent.Name())
+		if procLinkUnderRoot(filepath.Join(proc, "root"), root) ||
+			procLinkUnderRoot(filepath.Join(proc, "cwd"), root) ||
+			mountinfoHasMountpoint(filepath.Join(proc, "mountinfo"), root) {
+			return true
+		}
+	}
+	return false
+}
+
+func procLinkUnderRoot(path, root string) bool {
+	target, err := os.Readlink(path)
+	if err != nil {
+		return false
+	}
+	target = strings.TrimSuffix(target, " (deleted)")
+	target = filepath.Clean(target)
+	return target == root || strings.HasPrefix(target, root+string(filepath.Separator))
+}
+
+func mountinfoHasMountpoint(path, root string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1024), 1024*1024)
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 5 {
+			continue
+		}
+		mountpoint := filepath.Clean(unescapeMountinfo(fields[4]))
+		if mountpoint == root || strings.HasPrefix(mountpoint, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func unescapeMountinfo(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) && isOctal(s[i+1]) && isOctal(s[i+2]) && isOctal(s[i+3]) {
+			v := (s[i+1]-'0')<<6 | (s[i+2]-'0')<<3 | (s[i+3] - '0')
+			b.WriteByte(v)
+			i += 3
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func isOctal(b byte) bool {
+	return b >= '0' && b <= '7'
+}
+
+func allDecimalDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func cleanupRoot(root string) {

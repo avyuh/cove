@@ -86,6 +86,12 @@ func TestBuildEnvInjectBaseURLDummyAndPassthrough(t *testing.T) {
 	}
 }
 
+func TestAgentTrampolineUsesProcSelfExe(t *testing.T) {
+	if agentTrampolinePath != "/proc/self/exe" {
+		t.Fatalf("agentTrampolinePath = %q, want /proc/self/exe", agentTrampolinePath)
+	}
+}
+
 func TestWaitForPIDExitAndSignalCodes(t *testing.T) {
 	cmd := exec.Command("/bin/sh", "-c", "exit 42")
 	if err := cmd.Start(); err != nil {

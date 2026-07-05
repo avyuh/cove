@@ -9,13 +9,15 @@ created_bait=()
 
 audit_path="${XDG_STATE_HOME:-$HOME/.local/state}/cove/audit.log"
 state_sock="${XDG_STATE_HOME:-$HOME/.local/state}/cove/proxyd.sock"
+state_dir="$(dirname "$state_sock")"
+sessions_dir="$state_dir/sessions"
 ca_pem="${COVE_CA_PEM:-$HOME/.config/cove/ca.pem}"
 ca_key="${COVE_CA_KEY:-$HOME/.config/cove/ca-key.pem}"
 host_root_bait="/tmp/cove_host_root_bait.$$"
 
 cleanup() {
   for p in "${created_bait[@]}"; do
-    rm -f "$p"
+    rm -rf "$p"
   done
   rm -f "$host_root_bait"
   rm -rf "$WORK"
@@ -74,6 +76,104 @@ expect_exit() {
     return 1
   fi
   return 0
+}
+
+wait_for_path() {
+  local path="$1"
+  local i
+  for i in $(seq 1 100); do
+    [[ -e "$path" ]] && return 0
+    sleep 0.05
+  done
+  echo "timed out waiting for $path"
+  return 1
+}
+
+proxy_ping() {
+  local sock="${1:-$state_sock}"
+  python3 - "$sock" <<'PY'
+import socket, sys
+path = sys.argv[1]
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(2)
+s.connect(path)
+s.sendall(b"PING\n")
+data = s.recv(1024).decode("utf-8", "replace")
+print(data.strip())
+sys.exit(0 if data.startswith("PONG ") else 1)
+PY
+}
+
+proxyd_pid_for_state() {
+  local dir="$1"
+  python3 - "$dir" <<'PY'
+import os, sys
+state = os.path.abspath(sys.argv[1])
+lock = os.path.join(state, "proxyd.lock")
+uid = os.getuid()
+for name in os.listdir("/proc"):
+    if not name.isdigit():
+        continue
+    pid = int(name)
+    proc = os.path.join("/proc", name)
+    try:
+        with open(os.path.join(proc, "status"), "r", encoding="utf-8", errors="replace") as f:
+            status = f.read().splitlines()
+        uid_line = next((line for line in status if line.startswith("Uid:")), "")
+        if not uid_line or int(uid_line.split()[1]) != uid:
+            continue
+        with open(os.path.join(proc, "cmdline"), "rb") as f:
+            cmd = [part for part in f.read().split(b"\0") if part]
+        if len(cmd) < 2 or cmd[1] != b"proxyd":
+            continue
+        fd_dir = os.path.join(proc, "fd")
+        for fd in os.listdir(fd_dir):
+            try:
+                if os.readlink(os.path.join(fd_dir, fd)) == lock:
+                    print(pid)
+                    sys.exit(0)
+            except OSError:
+                pass
+    except (OSError, ValueError, StopIteration):
+        pass
+sys.exit(1)
+PY
+}
+
+wait_proxyd_down() {
+  local dir="$1"
+  local i
+  for i in $(seq 1 100); do
+    if ! proxyd_pid_for_state "$dir" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "proxyd still running for $dir"
+  return 1
+}
+
+create_stale_unix_socket() {
+  local path="$1"
+  python3 - "$path" <<'PY'
+import os, socket, sys
+path = sys.argv[1]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
+s = socket.socket(socket.AF_UNIX)
+s.bind(path)
+s.close()
+PY
+}
+
+seed_isolated_cove() {
+  local cfg_home="$1"
+  mkdir -p "$cfg_home/cove"
+  cp "$ca_pem" "$cfg_home/cove/ca.pem"
+  cp "$ca_key" "$cfg_home/cove/ca-key.pem"
 }
 
 latest_audit_has() {
@@ -349,6 +449,254 @@ m5_pty_signal() {
   python3 "$SCRIPT_DIR/e2e-pty.py"
 }
 
+m7_flock_singleton() {
+  box_eval 'true'
+  local before after rc
+  before="$(proxyd_pid_for_state "$state_dir")"
+  set +e
+  timeout 2s "$COVE_BIN" proxyd >"$WORK/flock-second.out" 2>&1
+  rc=$?
+  set -e
+  test "$rc" -eq 0 || { echo "second proxyd rc=$rc"; cat "$WORK/flock-second.out"; return 1; }
+  after="$(proxyd_pid_for_state "$state_dir")"
+  test "$before" = "$after" || { echo "proxyd pid changed: before=$before after=$after"; return 1; }
+  proxy_ping "$state_sock" >/dev/null
+  echo "flock_singleton_pid=$before second_rc=$rc"
+}
+
+m7_concurrent_sessions() {
+  mkdir -p "$sessions_dir"
+  box_eval 'true'
+  local proxypid baseline start_size i fail fd_count sock_count
+  proxypid="$(proxyd_pid_for_state "$state_dir")"
+  baseline="$(find "/proc/$proxypid/fd" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
+  start_size="$(stat -c%s "$audit_path" 2>/dev/null || printf '0')"
+  local pids=()
+  for i in $(seq 1 20); do
+    (
+      "$COVE_BIN" -- /bin/sh -lc 'code="$(curl -sS --max-time 40 -o /dev/null -w "%{http_code}" https://pypi.org/simple/pip/)"; echo "http_code=$code"; test "$code" = "200"'
+    ) >"$WORK/concurrency.$i.out" 2>&1 &
+    pids+=("$!")
+  done
+  fail=0
+  for i in "${!pids[@]}"; do
+    if ! wait "${pids[$i]}"; then
+      echo "session $((i + 1)) failed"
+      sed 's/^/  /' "$WORK/concurrency.$((i + 1)).out"
+      fail=1
+    fi
+  done
+  test "$fail" -eq 0 || return 1
+  for i in $(seq 1 20); do
+    grep -F "http_code=200" "$WORK/concurrency.$i.out" >/dev/null || { echo "missing 200 for session $i"; cat "$WORK/concurrency.$i.out"; return 1; }
+  done
+  python3 - "$audit_path" "$start_size" 20 <<'PY'
+import json, os, sys
+path, start, want = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+records = []
+with open(path, "rb") as f:
+    size = os.fstat(f.fileno()).st_size
+    if start > size:
+        print(f"audit rotated during concurrency test: start={start} size={size}")
+        sys.exit(1)
+    f.seek(start)
+    for raw in f:
+        try:
+            rec = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if rec.get("host") == "pypi.org" and rec.get("policy") == "allow":
+            records.append(rec)
+sessions = [rec.get("session", "") for rec in records]
+distinct = sorted(set(sessions))
+bad = [s for s in sessions if not isinstance(s, str) or len(s) != 8]
+print(f"concurrency_audit_records={len(records)} distinct_sessions={len(distinct)}")
+if len(records) < want or len(distinct) < want or bad:
+    print("sessions=" + ",".join(sessions))
+    sys.exit(1)
+PY
+  for i in $(seq 1 100); do
+    fd_count="$(find "/proc/$proxypid/fd" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
+    sock_count="$(find "$sessions_dir" -maxdepth 1 -name '*.sock' 2>/dev/null | wc -l)"
+    if [[ "$sock_count" -eq 0 && "$fd_count" -le "$baseline" ]]; then
+      echo "concurrency_sessions=20 fd_baseline=$baseline fd_after=$fd_count session_sockets=$sock_count"
+      return 0
+    fi
+    sleep 0.1
+  done
+  echo "leak check failed: fd_baseline=$baseline fd_after=$fd_count session_sockets=$sock_count"
+  find "$sessions_dir" -maxdepth 1 -name '*.sock' -print 2>/dev/null || true
+  return 1
+}
+
+m7_one_session_parallel_requests() {
+  box_eval 'set -eu
+pids=""
+for i in $(seq 1 20); do
+  (code="$(curl -sS --max-time 40 -o /dev/null -w "%{http_code}" https://pypi.org/simple/pip/)"; echo "$i:$code"; test "$code" = "200") &
+  pids="$pids $!"
+done
+fail=0
+for pid in $pids; do
+  wait "$pid" || fail=1
+done
+test "$fail" = "0"'
+}
+
+m7_fail_closed_proxy_death() {
+  rm -f "$WORK/failclosed.ready" "$WORK/failclosed.go" "$WORK/failclosed.out"
+  "$COVE_BIN" --project "$WORK" -- /bin/sh -lc 'set -eu
+code="$(curl -sS --max-time 40 -o /dev/null -w "%{http_code}" https://pypi.org/simple/pip/)"
+echo "before_code=$code" > /work/failclosed.out
+test "$code" = "200"
+touch /work/failclosed.ready
+while [ ! -e /work/failclosed.go ]; do sleep 0.05; done
+set +e
+code="$(curl -sS --max-time 8 -o /dev/null -w "%{http_code}" https://pypi.org/simple/pip/ 2>>/work/failclosed.out)"
+rc=$?
+set -e
+echo "after_rc=$rc after_code=$code" >> /work/failclosed.out
+if [ "$rc" -eq 0 ] && [ "$code" = "200" ]; then
+  exit 1
+fi' >"$WORK/failclosed.launcher.out" 2>&1 &
+  local launcher=$!
+  wait_for_path "$WORK/failclosed.ready"
+  local pid
+  pid="$(proxyd_pid_for_state "$state_dir")"
+  kill -9 "$pid"
+  wait_proxyd_down "$state_dir"
+  touch "$WORK/failclosed.go"
+  if ! wait "$launcher"; then
+    cat "$WORK/failclosed.launcher.out"
+    cat "$WORK/failclosed.out" || true
+    return 1
+  fi
+  grep -F "before_code=200" "$WORK/failclosed.out" >/dev/null
+  grep -F "after_rc=" "$WORK/failclosed.out" >/dev/null
+  ! grep -F "after_rc=0 after_code=200" "$WORK/failclosed.out" >/dev/null
+  box_eval 'true'
+  proxy_ping "$state_sock" >/dev/null
+  sed 's/^/fail_closed_/' "$WORK/failclosed.out"
+}
+
+m7_kill9_sweep_reclaims() {
+  box_eval 'true'
+  mkdir -p "$sessions_dir"
+  local stale_root stale_sock stale_base launcher i count pid sock_count
+  stale_root="$(mktemp -d /tmp/cove-root.m7stale.XXXXXX)"
+  created_bait+=("$stale_root")
+  stale_sock="$sessions_dir/m7-stale-$$.sock"
+  stale_base="$(basename "$stale_sock")"
+  create_stale_unix_socket "$stale_sock"
+  created_bait+=("$stale_sock")
+  rm -f "$WORK/kill9.ready"
+  "$COVE_BIN" --project "$WORK" -- /bin/sh -lc 'touch /work/kill9.ready; sleep 1' >"$WORK/kill9.launcher.out" 2>&1 &
+  launcher=$!
+  wait_for_path "$WORK/kill9.ready"
+  count="$(find "$sessions_dir" -maxdepth 1 -name '*.sock' ! -name "$stale_base" 2>/dev/null | wc -l)"
+  test "$count" -ge 1 || { echo "no live session socket observed"; return 1; }
+  kill -9 "$launcher"
+  set +e
+  wait "$launcher" >/dev/null 2>&1
+  set -e
+  for i in $(seq 1 100); do
+    count="$(find "$sessions_dir" -maxdepth 1 -name '*.sock' ! -name "$stale_base" 2>/dev/null | wc -l)"
+    [[ "$count" -eq 0 ]] && break
+    sleep 0.05
+  done
+  test "$count" -eq 0 || { echo "session socket survived launcher kill"; find "$sessions_dir" -maxdepth 1 -name '*.sock' -print; return 1; }
+  sleep 2
+  pid="$(proxyd_pid_for_state "$state_dir")"
+  kill -9 "$pid"
+  wait_proxyd_down "$state_dir"
+  box_eval 'true'
+  test ! -e "$stale_root" || { echo "stale root still exists: $stale_root"; return 1; }
+  test ! -e "$stale_sock" || { echo "stale socket still exists: $stale_sock"; return 1; }
+  for i in $(seq 1 100); do
+    sock_count="$(find "$sessions_dir" -maxdepth 1 -name '*.sock' 2>/dev/null | wc -l)"
+    [[ "$sock_count" -eq 0 ]] && break
+    sleep 0.05
+  done
+  test "$sock_count" -eq 0 || { echo "session sockets leaked after sweep"; find "$sessions_dir" -maxdepth 1 -name '*.sock' -print; return 1; }
+  echo "kill9_stale_root_reclaimed=$stale_root"
+  echo "kill9_stale_socket_reclaimed=$stale_sock"
+}
+
+m7_sighup_reload() {
+  local cfg_home="$WORK/hup-cfg" state_home="$WORK/hup-state" state="$WORK/hup-state/cove"
+  rm -rf "$cfg_home" "$state_home"
+  seed_isolated_cove "$cfg_home"
+  cat >"$cfg_home/cove/config.toml" <<'EOF'
+[options]
+tmp_size = "256m"
+proxy_port = 8080
+audit = true
+allow = []
+EOF
+  rm -f "$WORK/sighup.ready" "$WORK/sighup.go" "$WORK/sighup.out"
+  env XDG_CONFIG_HOME="$cfg_home" XDG_STATE_HOME="$state_home" "$COVE_BIN" --project "$WORK" -- /bin/sh -lc 'set -eu
+out="$(curl -skv --max-time 8 https://example.com/ -o /dev/null 2>&1 || true)"
+printf "%s\n" "$out" > /work/sighup.out
+echo "$out" | grep -Eq "HTTP/1\.1 403|CONNECT tunnel failed, response 403"
+touch /work/sighup.ready
+while [ ! -e /work/sighup.go ]; do sleep 0.05; done
+code="$(curl -sS --max-time 20 -o /dev/null -w "%{http_code}" https://example.com/)"
+echo "after_code=$code" >> /work/sighup.out
+test "$code" = "200"' >"$WORK/sighup.launcher.out" 2>&1 &
+  local launcher=$!
+  wait_for_path "$WORK/sighup.ready"
+  cat >"$cfg_home/cove/config.toml" <<'EOF'
+[options]
+tmp_size = "256m"
+proxy_port = 8080
+audit = true
+allow = ["example.com"]
+EOF
+  local pid
+  pid="$(proxyd_pid_for_state "$state")"
+  kill -HUP "$pid"
+  touch "$WORK/sighup.go"
+  if ! wait "$launcher"; then
+    cat "$WORK/sighup.launcher.out"
+    cat "$WORK/sighup.out" || true
+    return 1
+  fi
+  grep -F "after_code=200" "$WORK/sighup.out" >/dev/null
+  kill "$pid" >/dev/null 2>&1 || true
+  wait_proxyd_down "$state" || true
+  echo "sighup_reload_pid=$pid after_code=200"
+}
+
+m7_audit_rotation_ring() {
+  local cfg_home="$WORK/rotation-cfg" state_home="$WORK/rotation-state" state="$WORK/rotation-state/cove"
+  rm -rf "$cfg_home" "$state_home"
+  seed_isolated_cove "$cfg_home"
+  cat >"$cfg_home/cove/config.toml" <<'EOF'
+[options]
+tmp_size = "256m"
+proxy_port = 8080
+audit = true
+allow = []
+EOF
+  env XDG_CONFIG_HOME="$cfg_home" XDG_STATE_HOME="$state_home" "$COVE_BIN" -- /bin/true
+  local audit="$state/audit.log" i pid
+  for i in $(seq 1 5); do
+    printf 'old-%s\n' "$i" >"$audit.$i"
+  done
+  truncate -s $((64 * 1024 * 1024 + 1)) "$audit"
+  env XDG_CONFIG_HOME="$cfg_home" XDG_STATE_HOME="$state_home" "$COVE_BIN" -- /bin/sh -lc 'out="$(curl -skv --max-time 8 https://rotation-denied.example.com/ -o /dev/null 2>&1 || true)"; printf "%s\n" "$out"; echo "$out" | grep -Eq "HTTP/1\.1 403|CONNECT tunnel failed, response 403"'
+  for i in $(seq 1 5); do
+    test -e "$audit.$i" || { echo "$audit.$i missing"; return 1; }
+  done
+  test ! -e "$audit.6" || { echo "$audit.6 should not exist"; return 1; }
+  grep -F "old-4" "$audit.5" >/dev/null
+  ! grep -F "old-5" "$audit.5" >/dev/null
+  pid="$(proxyd_pid_for_state "$state")"
+  kill "$pid" >/dev/null 2>&1 || true
+  wait_proxyd_down "$state" || true
+  echo "audit_rotation_ring=1..5 capped old5_dropped"
+}
+
 check prereq require_paths
 setup_bait
 
@@ -368,6 +716,13 @@ check E-log-filters e_log_filters
 check G-exit-codes g_exit_codes
 check M5-non-tty-pipe non_tty_pipe
 check M5-pty-signal-resize m5_pty_signal
+check M7-flock-singleton m7_flock_singleton
+check M7-concurrent-sessions m7_concurrent_sessions
+check M7-one-session-parallel m7_one_session_parallel_requests
+check M7-fail-closed-proxy-death m7_fail_closed_proxy_death
+check M7-kill9-sweep-reclaims m7_kill9_sweep_reclaims
+check M7-sighup-reload m7_sighup_reload
+check M7-audit-rotation-ring m7_audit_rotation_ring
 
 if [[ $failures -ne 0 ]]; then
   echo "FAILURES $failures"

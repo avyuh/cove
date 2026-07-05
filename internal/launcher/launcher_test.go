@@ -144,6 +144,54 @@ base_url_value = "https://api.example.com"
 	}
 }
 
+func TestSweepRootPathsRemovesInactiveImmediately(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "cove-root.stale")
+	active := filepath.Join(dir, "cove-root.active")
+	if err := os.Mkdir(stale, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(active, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := sweepRootPaths([]string{stale, active}, false, func(path string) bool {
+		return path == filepath.Clean(active)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale root still exists or stat failed: %v", err)
+	}
+	if _, err := os.Stat(active); err != nil {
+		t.Fatalf("active root was removed: %v", err)
+	}
+}
+
+func TestSweepRootPathsForceRemovesActive(t *testing.T) {
+	active := filepath.Join(t.TempDir(), "cove-root.active")
+	if err := os.Mkdir(active, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := sweepRootPaths([]string{active}, true, func(string) bool { return true }); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(active); !os.IsNotExist(err) {
+		t.Fatalf("forced active root still exists or stat failed: %v", err)
+	}
+}
+
+func TestMountinfoHasMountpointUnescapesPaths(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mountinfo")
+	root := "/tmp/cove-root.with space"
+	line := "36 25 0:32 / /tmp/cove-root.with\\040space rw,nosuid - tmpfs tmpfs rw\n"
+	if err := os.WriteFile(path, []byte(line), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !mountinfoHasMountpoint(path, root) {
+		t.Fatalf("mountinfoHasMountpoint did not find escaped mountpoint")
+	}
+}
+
 func TestEnvMatch(t *testing.T) {
 	tests := []struct {
 		pattern string
