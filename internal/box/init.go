@@ -2,6 +2,7 @@ package box
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -79,6 +80,10 @@ func InitMain() int {
 	}
 	code, err := runAgent(d, statusFD, root)
 	if err != nil {
+		if agentNotFound(err) {
+			writeStatus(statusFD, "ERR agent-not-found "+strconv.Quote(d.AgentArgv[0]))
+			return 127
+		}
 		writeStatus(statusFD, "ERR exec "+err.Error())
 		return 75
 	}
@@ -135,6 +140,10 @@ func runAgent(d Directives, statusFD int, root string) (int, error) {
 	writeStatus(statusFD, "OK "+root)
 	forwardSignals(cmd.Process.Pid)
 	return waitForPID(cmd.Process.Pid), nil
+}
+
+func agentNotFound(err error) bool {
+	return errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist)
 }
 
 func forwardSignals(pid int) {

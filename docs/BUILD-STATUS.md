@@ -65,7 +65,15 @@ Ship gate (§9): M3 solid + M4 proven → shippable; M5–M8 harden and complete
 Unit tests per §15.1 land with their milestone (config/allowlist → M6 or
 earlier, secret/ca/audit → M3/M4, inject httptest C1 flow → M4, bufConn → M5
 per §15.1, or earlier with the h1-inject code). Full acceptance =
-`scripts/e2e.sh` (§15.2).
+`scripts/e2e.sh` (§15.2) PLUS the per-milestone TESTPLAN tests (standing-bar
+section above) AND the final TESTER A–G sweep below.
+
+**TEST (final gate, TODO) — adversarial A–G sweep on the box (after M8):**
+B security invariants EXECUTED (bait-absent, ENETUNREACH, CapBnd==CapEff==0,
+NoNewPrivs:1, no `/.oldroot`, audit-unforgeable, CA-key-absent-in-box,
+allow-path-not-terminated), C 20–30 concurrent, D fail-closed + kill-9 no-leaks
++ SIGHUP + rotation, E/F/G → writes `docs/TEST-RESULTS.md`, files failures back.
+cove not "done" until green or residuals owner-accepted.
 
 ## Sequencing & cross-milestone risks (M4→M8)
 
@@ -158,3 +166,10 @@ Planned order: **M4 → M5 → M6 → M7 → M8** (straight §9 order). Notes:
   absent (`/root/.ssh/*` missing + `ABSENT`); `/work` listed the repo and a write
   probe wrote `hi`; the audit log contains a close-time allow record for
   `github.com` with nonzero `bytes_up`/`bytes_down`; no `/tmp/cove-root.*` leaks.
+- 2026-07-05 — M0–M3 TEST-BACKFILL — DONE — added repeatable TESTPLAN A unit
+  tables plus `scripts/e2e-box.sh` for B/E/G; `go build ./...`, `go vet ./...`,
+  `go test ./... -count=1`, and `bash scripts/e2e-box.sh` passed. Deferred
+  minors intentionally not fixed: agent child explicit §13.2 step-13 re-assert
+  (covered by NoNewPrivs/cap tests until M5), `/proc/1/comm` cosmetic name,
+  pre-M4 inject audit label still records opaque fall-through as `allow`, and
+  `sweepRoots` still uses the 24h threshold pending M7 lifecycle work.

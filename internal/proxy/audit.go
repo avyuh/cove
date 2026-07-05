@@ -29,6 +29,7 @@ type countingReadCloser struct {
 	n       int64
 	onClose func(n int64)
 	once    sync.Once
+	err     error
 }
 
 type AuditWriter struct {
@@ -105,6 +106,7 @@ func (c *countingReadCloser) Close() error {
 		if c.onClose != nil {
 			c.onClose(c.n)
 		}
+		c.err = c.rc.Close()
 	})
-	return c.rc.Close()
+	return c.err
 }

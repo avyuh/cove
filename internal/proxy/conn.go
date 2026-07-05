@@ -201,7 +201,11 @@ func (p *Proxyd) dialAllowed(t Target) (net.Conn, error) {
 	host := t.Host
 	ip := net.ParseIP(host)
 	if ip == nil {
-		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		lookup := net.DefaultResolver.LookupIPAddr
+		if p.lookupIP != nil {
+			lookup = p.lookupIP
+		}
+		addrs, err := lookup(ctx, host)
 		if err != nil {
 			return nil, err
 		}
@@ -211,5 +215,9 @@ func (p *Proxyd) dialAllowed(t Target) (net.Conn, error) {
 		ip = addrs[0].IP
 	}
 	d := net.Dialer{Timeout: 10 * time.Second}
-	return d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(t.Port)))
+	dial := d.DialContext
+	if p.dialTCP != nil {
+		dial = p.dialTCP
+	}
+	return dial(ctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(t.Port)))
 }

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -219,7 +220,7 @@ func spawnInit(d box.Directives, verbose bool) (int, error) {
 	}
 	if !strings.HasPrefix(line, "OK") {
 		_ = cmd.Wait()
-		return 75, ExitError{Code: 75, Msg: "cove: box setup failed: " + line}
+		return initStatusFailure(line)
 	}
 	root := ""
 	if fields := strings.Fields(line); len(fields) > 1 {
@@ -242,6 +243,20 @@ func spawnInit(d box.Directives, verbose bool) (int, error) {
 		}
 	}
 	return 1, err
+}
+
+func initStatusFailure(line string) (int, error) {
+	if strings.HasPrefix(line, "ERR agent-not-found ") {
+		agent := strings.TrimSpace(strings.TrimPrefix(line, "ERR agent-not-found "))
+		if unquoted, err := strconv.Unquote(agent); err == nil {
+			agent = unquoted
+		}
+		if agent == "" {
+			agent = "agent"
+		}
+		return 127, ExitError{Code: 127, Msg: "cove: agent '" + strings.ReplaceAll(agent, "'", "'\\''") + "' not found in box PATH"}
+	}
+	return 75, ExitError{Code: 75, Msg: "cove: box setup failed: " + line}
 }
 
 func ensureProxySession(agentPath string) (net.Conn, string, error) {
@@ -370,6 +385,9 @@ func parseCredMounts(entries []string) ([]box.CredMount, error) {
 		}
 		if strings.HasPrefix(path, "~/") {
 			path = filepath.Join(home, strings.TrimPrefix(path, "~/"))
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(home, path)
 		}
 		abs, err := filepath.Abs(path)
 		if err != nil {

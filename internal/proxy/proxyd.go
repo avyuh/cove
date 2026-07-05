@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -39,7 +40,12 @@ type Proxyd struct {
 	stateDir string
 	sessDir  string
 	log      io.Writer
+	lookupIP lookupIPFunc
+	dialTCP  dialTCPFunc
 }
+
+type lookupIPFunc func(context.Context, string) ([]net.IPAddr, error)
+type dialTCPFunc func(context.Context, string, string) (net.Conn, error)
 
 func Serve(cfg *config.Config, sockPath string) error {
 	state := config.StateDir()
