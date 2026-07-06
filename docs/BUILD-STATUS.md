@@ -58,7 +58,8 @@ F streaming, G error paths). Rules:
 | M4 | **h2 MITM inject (make-or-break, gates the whole inject feature)**: leaf minting, client-facing h2 TLS termination, ReverseProxy strip+inject, FlushInterval=-1, upstream h2 | §4.5, §4.7, §4.8, §9/M4, §14 | `cove -- claude -p "reply with exactly: COVE-OK"` → real streamed 200 through MITM+inject over h2, token host-side only, box holds dummy `ANTHROPIC_API_KEY` (dummy `x-api-key` stripped); audit shows `POST /v1/messages` status 200; if h2 misbehaves, prove `alpn="http/1.1"` downgrade (e2e step 4) | DONE |
 | M5 | Interactive polish: signal forwarding, SIGWINCH resize via control pipe, termios save/restore, exit-code propagation, cap-drop verified | §3.4–3.5, §6.1, §9/M5, §13.2 steps 12a–13 | `cove -- claude` TUI resizes on window change; Ctrl-C hits the agent not the launcher; exit codes match bare runs (incl. status-pipe/75 disambiguation); agent has empty cap bounding set + no_new_privs | DONE |
 | M6 | Full proxy/config: base_url rewrites, kimi plain-HTTP loopback, cred_mount/env_passthrough, all seed stanzas, Validate() | §3.7b, §3.8, §5 (all), §9/M6, §12.1 | Kimi flow works via dynamic-port `KIMI_BASE_URL` loopback with injected key; each seed inject stanza round-trips against a stub upstream; config with host in both allow+inject fails to load; embedded seed passes `Validate()` (§15.1 B1 test) | DONE |
-| M7 | Lifecycle/robustness: auto-spawn + PING/PONG, flock singleton, SIGHUP reload, per-session sockets/REGISTER, crash sweep, fail-closed, audit rotation | §3.9, §4.1, §4.10, §9/M7 | Kill proxy mid-session → egress fails closed; next run auto-spawns fresh proxy; 20 concurrent sessions all proxy correctly (20/20 200s); no leaked `/tmp/cove-root.*` or `sessions/*.sock` after `kill -9` of a launcher | IN PROGRESS |
+| M7 | Lifecycle/robustness: auto-spawn + PING/PONG, flock singleton, SIGHUP reload, per-session sockets/REGISTER, crash sweep, fail-closed, audit rotation | §3.9, §4.1, §4.10, §9/M7 | Kill proxy mid-session → egress fails closed; next run auto-spawns fresh proxy; 20 concurrent sessions all proxy correctly (20/20 200s); no leaked `/tmp/cove-root.*` or `sessions/*.sock` after `kill -9` of a launcher | DONE |
+| RT | RUNTIME-PATH (owner Option A): resolve agent+node on host, RO-bind the minimal toolchain/node-version-root at same path + box PATH, HOME-guard, `runtime_mount` escape hatch; supersedes M4 temp-copy | §3.3, §3.8, §5.7, §1.6 | `cove -- claude` resolves + runs vs real nvm install; bait/HOME still ABSENT + fail-closed + allow-opaque + mount EROFS after the runtime mount | DONE |
 | M8 | `cove log` verb + docs/positioning copy | §6.4, §8.4, §9/M8 | `cove log --follow --deny-only` shows denials live; filters (`--session`, `--host`) work; NO string anywhere says "secure sandbox" | TODO |
 
 Ship gate (§9): M3 solid + M4 proven → shippable; M5–M8 harden and complete.
@@ -221,6 +222,29 @@ Planned order: **M4 → M5 → M6 → M7 → M8** (straight §9 order). Notes:
   reviewer; awaiting owner's approach (auto-mount resolved agent bin dir vs
   system-install-required vs config runtime-mounts). Becomes its own scoped task
   once chosen.
+- 2026-07-05 — M7 — DONE — lifecycle/robustness. Reviewer QC PASS: concurrency
+  20/20 (distinct sessions, no leak); fail-closed-on-proxy-death (test catches
+  fail-open); kill-9 sweep reclaims pre-seeded stale root+socket; audit rotation
+  ring capped; caps-trampoline switched to exec `/proc/self/exe __agent`
+  (no ~11MB copy) with cap-drop still deterministic (sabotage-re-verified);
+  all carry-forward minors resolved; no regressions/deps. Committed locally.
+- 2026-07-05 — RUNTIME-PATH — IN PROGRESS — owner chose Option A. Dispatched
+  codex work-order: host-side resolve of agent + node → RO-bind the minimal
+  toolchain dir (node version root bin/+lib/) at same absolute path via
+  empty-ancestor mountpoints + prepend box PATH; hard guard against
+  HOME-or-ancestor; `runtime_mount` config escape hatch (Option C); remove M4's
+  temp-copy hack. Tests: TESTPLAN-B re-asserted after the mount (bait/HOME
+  absent, fail-closed, allow-opaque, EROFS) + positive real-nvm `cove -- claude`/
+  `codex` run + resolver/guard units.
+- 2026-07-06 — RUNTIME-PATH — DONE — host resolver now chooses the nvm node
+  version root for both JS shebang CLIs and native package symlink targets;
+  cove-init same-path ro-binds runtime dirs and prepends runtime `bin` to PATH;
+  `options.runtime_mount` escape hatch validates HOME-or-above. QC PASS:
+  `/usr/local/go/bin/go build ./...`, `go vet ./...`, `go test ./... -count=1`;
+  `scripts/e2e-box.sh` ALL PASS under the loaded AppArmor profile using the
+  rebuilt binary; `cove -- claude -p "reply with exactly: COVE-OK"` returned
+  `COVE-OK` via `/home/dev/.nvm/versions/node/v22.22.0` and audit recorded
+  `POST /v1/messages?beta=true` status 200.
 - 2026-07-05 — M0–M3 TEST-BACKFILL — DONE — added repeatable TESTPLAN A unit
   tables plus `scripts/e2e-box.sh` for B/E/G; `go build ./...`, `go vet ./...`,
   `go test ./... -count=1`, and `bash scripts/e2e-box.sh` passed. Deferred

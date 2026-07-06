@@ -14,6 +14,11 @@ sessions_dir="$state_dir/sessions"
 ca_pem="${COVE_CA_PEM:-$HOME/.config/cove/ca.pem}"
 ca_key="${COVE_CA_KEY:-$HOME/.config/cove/ca-key.pem}"
 host_root_bait="/tmp/cove_host_root_bait.$$"
+runtime_fixture_top="$HOME/.cove-e2e-runtime-$$"
+runtime_mount="$runtime_fixture_top/versions/node/v-test"
+runtime_first_component="$(basename "$runtime_fixture_top")"
+runtime_cfg_home="$WORK/runtime-cfg"
+runtime_state_home="$WORK/runtime-state"
 
 cleanup() {
   for p in "${created_bait[@]}"; do
@@ -57,6 +62,10 @@ check() {
 
 box_eval() {
   "$COVE_BIN" -- /bin/sh -lc "$1"
+}
+
+runtime_box_eval() {
+  env XDG_CONFIG_HOME="$runtime_cfg_home" XDG_STATE_HOME="$runtime_state_home" "$COVE_BIN" -- /bin/sh -lc "$1"
 }
 
 expect_exit() {
@@ -230,6 +239,26 @@ setup_bait() {
   printf 'COVE_HOST_ROOT_BAIT\n' >"$host_root_bait"
 }
 
+setup_runtime_fixture() {
+  mkdir -p "$runtime_mount/bin" "$runtime_mount/lib"
+  printf '#!/bin/sh\necho COVE-FAKE-RUNTIME\n' >"$runtime_mount/bin/cove-fake-runtime"
+  chmod 0755 "$runtime_mount/bin/cove-fake-runtime"
+  created_bait+=("$runtime_fixture_top")
+  seed_isolated_cove "$runtime_cfg_home"
+  mkdir -p "$runtime_state_home"
+  cat >"$runtime_cfg_home/cove/config.toml" <<EOF
+[options]
+tmp_size = "256m"
+proxy_port = 8080
+audit = true
+cred_mount = []
+runtime_mount = ["$runtime_mount"]
+env_passthrough = []
+
+allow = ["pypi.org"]
+EOF
+}
+
 b1_secret_absence() {
   box_eval 'set -eu
 for p in /root/.ssh/cove_bait /root/.aws/credentials /root/.claude/cove_bait /root/.config/gh/hosts.yml /root/.mozilla/firefox/cove.default/cookies.sqlite; do
@@ -396,6 +425,79 @@ sys.exit(1 if "cove local CA" in issuer.lower() else 0)
 PY'
 }
 
+rt_b1_secret_absence_home() {
+  local home_q mount_q first_q
+  home_q="$(sq "$HOME")"
+  mount_q="$(sq "$runtime_mount")"
+  first_q="$(sq "$runtime_first_component")"
+  runtime_box_eval "set -eu
+test -d ${mount_q}/bin
+test \"\$(command -v cove-fake-runtime)\" = \"${runtime_mount}/bin/cove-fake-runtime\"
+for p in ${home_q}/.ssh/cove_bait ${home_q}/.aws/credentials ${home_q}/.claude/cove_bait ${home_q}/.config/gh/hosts.yml; do
+  test ! -e \"\$p\" || { echo \"PRESENT \$p\"; exit 1; }
+done
+entries=\"\$(find ${home_q} -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)\"
+printf 'runtime_home_entries=%s\n' \"\$entries\"
+test \"\$entries\" = ${first_q}
+echo runtime-secret-absence-ok"
+}
+
+rt_b2_egress_fail_closed() {
+  runtime_box_eval 'python3 - <<'"'"'PY'"'"'
+import errno, socket, sys
+s = socket.socket()
+try:
+    s.connect(("1.1.1.1", 443))
+except OSError as e:
+    print(f"errno={e.errno}")
+    sys.exit(0 if e.errno == errno.ENETUNREACH else 1)
+else:
+    print("raw connect unexpectedly succeeded")
+    sys.exit(1)
+PY'
+  runtime_box_eval 'out="$(curl -skv --max-time 8 https://evil.example.com/ -o /dev/null 2>&1 || true)"; printf "%s\n" "$out"; echo "$out" | grep -Eq "HTTP/1\.1 403|CONNECT tunnel failed, response 403"'
+}
+
+rt_b7_allow_opaque() {
+  runtime_box_eval 'python3 - <<'"'"'PY'"'"'
+import socket, ssl, sys
+s = socket.create_connection(("127.0.0.1", 8080), timeout=8)
+s.sendall(b"CONNECT pypi.org:443 HTTP/1.1\r\nHost: pypi.org\r\n\r\n")
+resp = b""
+while b"\r\n\r\n" not in resp:
+    chunk = s.recv(4096)
+    if not chunk:
+        break
+    resp += chunk
+print(resp.decode("utf-8", "replace").splitlines()[0] if resp else "no response")
+if b"200 Connection Established" not in resp:
+    sys.exit(1)
+ctx = ssl.create_default_context()
+tls = ctx.wrap_socket(s, server_hostname="pypi.org")
+cert = tls.getpeercert()
+issuer = " ".join("=".join(x) for rdn in cert.get("issuer", ()) for x in rdn)
+print("issuer=" + issuer)
+sys.exit(1 if "cove local CA" in issuer.lower() else 0)
+PY'
+}
+
+rt_read_only_erofs() {
+  local target_q
+  target_q="$(sq "$runtime_mount/cove-write-test")"
+  runtime_box_eval "python3 - ${target_q} <<'PY'
+import errno, sys
+try:
+    with open(sys.argv[1], 'w', encoding='utf-8') as f:
+        f.write('nope')
+except OSError as e:
+    print(f'errno={e.errno}')
+    sys.exit(0 if e.errno == errno.EROFS else 1)
+else:
+    print('runtime mount write unexpectedly succeeded')
+    sys.exit(1)
+PY"
+}
+
 e_pypi_allow_audit() {
   box_eval 'code="$(curl -sS --max-time 20 -o /dev/null -w "%{http_code}" https://pypi.org/simple/pip/)"; echo "http_code=$code"; test "$code" = "200"'
   latest_audit_has "pypi.org" "allow" "allow_closed"
@@ -406,6 +508,57 @@ e_log_filters() {
   "$COVE_BIN" log --deny-only >"$WORK/deny-only.log"
   grep -F '"policy":"deny"' "$WORK/deny-only.log" >/dev/null
   ! grep -F '"policy":"allow"' "$WORK/deny-only.log" >/dev/null
+}
+
+e_claude_runtime_positive() {
+  command -v claude >/dev/null || { echo "host claude missing from PATH"; return 1; }
+  [[ -s "$HOME/.claude/.credentials.json" ]] || { echo "host Claude OAuth credentials missing"; return 1; }
+  local start_size rc opts
+  start_size="$(stat -c%s "$audit_path" 2>/dev/null || printf '0')"
+  opts="$-"
+  set +e
+  timeout 180s "$COVE_BIN" -- claude -p "reply with exactly: COVE-OK" >"$WORK/claude-runtime.out" 2>"$WORK/claude-runtime.err"
+  rc=$?
+  case "$opts" in
+    *e*) set -e ;;
+    *) set +e ;;
+  esac
+  cat "$WORK/claude-runtime.out"
+  if [[ $rc -ne 0 ]]; then
+    echo "claude rc=$rc"
+    sed 's/^/  /' "$WORK/claude-runtime.err"
+    return 1
+  fi
+  grep -F "COVE-OK" "$WORK/claude-runtime.out" >/dev/null || { echo "missing COVE-OK"; return 1; }
+  grep -F "cove: runtime " "$WORK/claude-runtime.err" >/dev/null || { echo "missing runtime mount note"; return 1; }
+  python3 - "$audit_path" "$start_size" <<'PY'
+import json, os, sys
+path, start = sys.argv[1], int(sys.argv[2])
+records = []
+with open(path, "rb") as f:
+    size = os.fstat(f.fileno()).st_size
+    if start > size:
+        print(f"audit rotated during claude test: start={start} size={size}")
+        sys.exit(1)
+    f.seek(start)
+    for raw in f:
+        try:
+            rec = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if (
+            rec.get("host") == "api.anthropic.com"
+            and rec.get("policy") == "inject"
+            and rec.get("method") == "POST"
+            and str(rec.get("path", "")).startswith("/v1/messages")
+            and rec.get("status") == 200
+        ):
+            records.append(rec)
+if not records:
+    print("missing claude POST /v1/messages status 200 audit record")
+    sys.exit(1)
+print(json.dumps(records[-1], sort_keys=True))
+PY
 }
 
 g_exit_codes() {
@@ -699,6 +852,7 @@ EOF
 
 check prereq require_paths
 setup_bait
+setup_runtime_fixture
 
 check B1-secret-absence b1_secret_absence
 check B2-ip-proxy-403 b2_ip_proxy_403
@@ -711,8 +865,13 @@ check B4-pivot-root b4_pivot_root
 check B5-audit-unforgeable b5_audit_unforgeable
 check B6-ca-key-absent b6_ca_key_absent
 check B7-allow-opaque b7_allow_opaque
+check RT-B1-secret-absence-home rt_b1_secret_absence_home
+check RT-B2-egress-fail-closed rt_b2_egress_fail_closed
+check RT-B7-allow-opaque rt_b7_allow_opaque
+check RT-read-only-EROFS rt_read_only_erofs
 check E-pypi-allow-audit e_pypi_allow_audit
 check E-log-filters e_log_filters
+check E-claude-runtime-positive e_claude_runtime_positive
 check G-exit-codes g_exit_codes
 check M5-non-tty-pipe non_tty_pipe
 check M5-pty-signal-resize m5_pty_signal

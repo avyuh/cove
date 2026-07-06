@@ -3,6 +3,10 @@ tmp_size = "256m"
 proxy_port = 8080
 audit = true
 cred_mount = []
+# Extra read-only toolchain dirs to mount at the same absolute path in the box.
+# Usually empty: cove auto-resolves nvm/volta/asdf-installed agent runtimes.
+# System-installing tools under /usr/local/bin needs no runtime_mount.
+runtime_mount = []
 env_passthrough = []
 
 allow = [

@@ -27,6 +27,7 @@ type Directives struct {
 	CABundlePEM    []byte
 	Inject         []InjectDirective
 	CredMount      []CredMount
+	RuntimeMount   []string
 	EnvPassthrough map[string]string
 }
 

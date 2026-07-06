@@ -86,6 +86,18 @@ func TestBuildEnvInjectBaseURLDummyAndPassthrough(t *testing.T) {
 	}
 }
 
+func TestBuildEnvPrependsRuntimeMountBinToPath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	env := envMap(buildEnv(Directives{RuntimeMount: []string{root}}))
+	wantPrefix := filepath.Join(root, "bin") + string(os.PathListSeparator)
+	if !strings.HasPrefix(env["PATH"], wantPrefix) {
+		t.Fatalf("PATH = %q, want prefix %q", env["PATH"], wantPrefix)
+	}
+}
+
 func TestAgentTrampolineUsesProcSelfExe(t *testing.T) {
 	if agentTrampolinePath != "/proc/self/exe" {
 		t.Fatalf("agentTrampolinePath = %q, want /proc/self/exe", agentTrampolinePath)

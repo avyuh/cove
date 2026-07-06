@@ -96,6 +96,105 @@ func TestParseCredMounts(t *testing.T) {
 	}
 }
 
+func TestResolveRuntimeMountsPicksNVMVersionRoot(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".nvm", "versions", "node", "v22.0.0")
+	bin := filepath.Join(root, "bin")
+	lib := filepath.Join(root, "lib", "node_modules", "@anthropic-ai", "claude-code")
+	if err := os.MkdirAll(bin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(lib, 0755); err != nil {
+		t.Fatal(err)
+	}
+	node := filepath.Join(bin, "node")
+	if err := os.WriteFile(node, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cli := filepath.Join(lib, "cli.js")
+	if err := os.WriteFile(cli, []byte("#!/usr/bin/env node\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../lib/node_modules/@anthropic-ai/claude-code/cli.js", filepath.Join(bin, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", bin)
+	mounts, err := resolveRuntimeMounts("claude", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) != 1 || mounts[0] != root {
+		t.Fatalf("runtime mounts = %#v, want [%q]", mounts, root)
+	}
+}
+
+func TestResolveRuntimeMountsPicksRootForNativePackageSymlink(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".nvm", "versions", "node", "v22.0.0")
+	bin := filepath.Join(root, "bin")
+	pkgBin := filepath.Join(root, "lib", "node_modules", "@anthropic-ai", "claude-code", "bin")
+	if err := os.MkdirAll(bin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(pkgBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(pkgBin, "claude.exe")
+	if err := os.WriteFile(target, []byte{0x7f, 'E', 'L', 'F'}, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe", filepath.Join(bin, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", bin)
+	mounts, err := resolveRuntimeMounts("claude", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mounts) != 1 || mounts[0] != root {
+		t.Fatalf("runtime mounts = %#v, want [%q]", mounts, root)
+	}
+}
+
+func TestResolveRuntimeMountsRejectsHomeOrAboveWidening(t *testing.T) {
+	home := t.TempDir()
+	shims := filepath.Join(home, "shims")
+	bin := filepath.Join(home, "bin")
+	lib := filepath.Join(home, "lib")
+	agentDir := filepath.Join(home, "agent")
+	for _, dir := range []string{shims, bin, lib, agentDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(bin, "node"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	cli := filepath.Join(agentDir, "cli.js")
+	if err := os.WriteFile(cli, []byte("#!/usr/bin/env node\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../agent/cli.js", filepath.Join(shims, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", shims+string(os.PathListSeparator)+bin)
+	mounts, err := resolveRuntimeMounts("claude", nil)
+	if err == nil {
+		t.Fatalf("expected HOME-or-above guard rejection, got mounts %#v", mounts)
+	}
+	if !strings.Contains(err.Error(), "options.runtime_mount") || !strings.Contains(err.Error(), "system-install") {
+		t.Fatalf("guard error lacks guidance: %v", err)
+	}
+	for _, mount := range mounts {
+		if mount == home || filepath.Dir(home) == mount {
+			t.Fatalf("guard returned broad mount: %#v", mounts)
+		}
+	}
+}
+
 func TestBuildDirectivesCopiesEnvPassthroughAndInjectTargets(t *testing.T) {
 	cfgHome := t.TempDir()
 	cfgDir := filepath.Join(cfgHome, "cove")

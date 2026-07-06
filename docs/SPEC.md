@@ -357,6 +357,18 @@ Steps, in order:
    explicitly lists them. Each mounted credential is thereby "in the box":
    exfil-contained by egress policy but NOT theft-proof. cove logs a one-line
    warning at launch naming each `cred_mount` and its ro/rw mode.
+9b. **Runtime toolchain mounts (`runtime_mount`, reflex replacement — §1.6/§5.7):**
+   before pivot, cove bind-mounts each resolved runtime toolchain directory at
+   the **same absolute path** inside the box, read-only with `nosuid,nodev`. The
+   launcher auto-resolves the invoked agent and its Node interpreter from the
+   host `PATH`; for nvm/volta/asdf-style layouts it mounts the node version root
+   that contains both `bin/` and `lib/node_modules/...`, not only `bin/`.
+   Ancestors such as `/home/<user>`, `/home`, `/root`, `/etc`, or `/` MUST NOT be
+   mounted. cove creates empty ancestor directories in the tmpfs root (e.g.
+   `/home/<user>/.nvm/versions/node`) and binds only the toolchain leaf, so HOME
+   dotfiles remain absent. Explicit `options.runtime_mount` entries are added on
+   top of auto-resolution and use the same read-only same-path mount. cove logs a
+   one-line launch note naming each runtime mount and its ro mode.
 10. **Pivot into the new root (MANDATORY `pivot_root`; chroot fallback FORBIDDEN
     — B3):** `chdir(root)`; `mkdir(root+"/.oldroot")`;
     `pivot_root(root, root+"/.oldroot")`; `chdir("/")`;
@@ -388,9 +400,11 @@ Steps, in order:
     capabilities** and no ability to gain privileges.
 
 **Secrets are absent by construction.** No `~/.ssh`, `~/.aws`, `~/.claude`,
-`~/.config/*`, browser profiles, or any host dotfile appears anywhere in this
-tree — EXCEPT the explicit opt-in `cred_mount` entries (step 9a), which the user
-consciously accepts placing in the box. There is no denylist to get wrong.
+`~/.config/*`, browser profiles, or host HOME contents appear anywhere in this
+tree — EXCEPT explicit opt-in `cred_mount` entries (step 9a). Runtime mounts
+(step 9b) may create an otherwise-empty `/home/<user>/...` ancestor chain, but
+only the read-only toolchain leaf is bound there; HOME itself and its dotfiles
+are not mounted. There is no denylist to get wrong.
 
 ### 3.4 PID namespace + in-box init responsibilities
 
@@ -499,8 +513,8 @@ inherit the host environment, to avoid leaking host secrets in env vars).
 
 **Env hygiene:** before `execve`, the agent env MUST contain none of cove's
 bootstrap vars (`COVE_DIR_FD`, `COVE_STATUS_FD`, `COVE_CTL_FD`, `COVE_TERM`,
-etc.); directives (CA bytes, dummy envs, cred_mounts) are passed via a pipe
-`ExtraFiles` fd, never an env var, so they never appear in
+etc.); directives (CA bytes, dummy envs, cred_mounts, runtime_mounts) are passed
+via a pipe `ExtraFiles` fd, never an env var, so they never appear in
 `/proc/<agent>/environ`. (See §13.1.)
 
 **Fd hygiene (N7):** the inherited control fds (`COVE_DIR_FD=3`,
@@ -518,7 +532,11 @@ Base set:
 
 - `HOME=/root` (ephemeral tmpfs home, §3.3 step 6a — NOT `/work`)
 - `USER=root`, `LOGNAME=root`
-- `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`
+- `PATH=<runtime bin dirs>:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`
+  where each runtime mount contributes its `bin/` directory when present (or the
+  mount directory itself when it is already a `bin`/tool dir). Runtime prefixes
+  come first so `claude`/`codex`/`node` from nvm/volta/asdf resolve exactly as
+  they did in the host shell.
 - `TERM` = copied from host (needed for TUI).
 - `TMPDIR=/tmp`
 - `LANG`/`LC_*` = copied from host if set (locale correctness), else `C.UTF-8`.
@@ -955,6 +973,12 @@ audit      = true        # audit log on/off (default true)
 # (unsafe under concurrent sessions — §5.7). Empty by default (nothing enters box).
 cred_mount = []          # e.g. ["~/.codex", "~/.config/gh"]  (both read-only)
 
+# Runtime toolchain dirs mounted read-only at the SAME absolute path (§3.3 step
+# 9b). Usually empty: cove auto-resolves nvm/volta/asdf-installed agent
+# runtimes. System-installing the tool under /usr/local/bin is the
+# max-isolation path and needs no runtime mount.
+runtime_mount = []       # e.g. ["~/.nvm/versions/node/v22.0.0"]
+
 # Env vars copied into the box (glob-matched, §D10). These values DO enter the
 # box. Only Class-B/C session material you accept containing. No bare "*".
 env_passthrough = []     # e.g. ["AWS_ACCESS_KEY_ID","AWS_SECRET_ACCESS_KEY","AWS_SESSION_TOKEN"]
@@ -1001,9 +1025,11 @@ alpn          = "h2"                     # OPTIONAL: force client-facing ALPN
 
 **`allow`** is just a flat list of host rules — no stanza.
 
-**Validate() must additionally:** reject a `cred_mount`/`env_passthrough` entry
-of `*`, `~`, `/`, or any glob that would match everything (D10); warn if a
-`cred_mount` path does not exist on the host.
+**Validate() must additionally:** reject a `cred_mount`/`runtime_mount`/
+`env_passthrough` entry of `*`, `~`, `/`, or any glob that would match
+everything (D10); reject `runtime_mount` values that are `/home`, `/root`,
+`/etc`, or HOME-or-above; warn if a `cred_mount` or `runtime_mount` path does
+not exist on the host.
 
 ### 5.4 Secret references and the claude OAuth-refresh case
 
@@ -1059,6 +1085,7 @@ key in a way that breaks installs.
 [options]
 audit = true
 cred_mount = []          # add Class-B/C session dirs here to enable those tools (§5.7)
+runtime_mount = []       # usually empty; auto-resolves nvm/volta/asdf toolchains (§5.7)
 env_passthrough = []     # e.g. AWS_* for aws/s5cmd SigV4 (§5.7)
 
 # ── ALLOW: opaque-tunnel hosts (credential lives in the box, exfil-contained) ──
@@ -1248,6 +1275,15 @@ deny-by-default box stays secret-free until the user consciously opts in.
   names copied into the agent env (§3.8). For SigV4 with STS this is the natural
   shape: `["AWS_ACCESS_KEY_ID","AWS_SECRET_ACCESS_KEY","AWS_SESSION_TOKEN","AWS_REGION"]`.
   Glob semantics and the ban on over-broad patterns are in D10.
+- **`runtime_mount` (toolchain FILES, not credentials):** a separate escape hatch
+  for agent runtimes auto-resolution misses. Entries are concrete host
+  directories mounted read-only at the **same absolute path** inside the box
+  (§3.3 step 9b), and their `bin/` directory is prepended to PATH (§3.8). Values
+  MUST NOT be `*`, bare `~`, `/`, `/home`, `/root`, `/etc`, the user's HOME, or
+  an ancestor of HOME. This key is for narrow toolchain roots such as
+  `~/.nvm/versions/node/v22.0.0`; it MUST NOT be used to mount HOME. The
+  max-isolation alternative is to system-install the agent under `/usr/local/bin`
+  (already visible via the read-only `/usr` bind), which needs no runtime mount.
 
 **Honesty requirement:** for every active `cred_mount`/`env_passthrough` entry,
 cove prints a one-line warning at launch: `cove: credential '~/.codex' is mounted
@@ -1255,6 +1291,8 @@ INTO the box read-only (exfil-contained, not theft-proof)` (or `read-write —
 UNSAFE under concurrent sessions` for `:rw`). This makes the class-B/C tradeoff
 explicit and never silent. These credentials are subject to the oracle/misuse and
 in-box-theft residuals (§8.2), unlike Class-A injected keys.
+For every active `runtime_mount`, cove prints a separate one-line note naming the
+toolchain directory and read-only same-path mode.
 
 **Friction reconciliation (§1.6):** the kill metric is bare-`claude`/`codex`
 count. claude works at zero config (Class-A inject, seed default). codex works
@@ -1819,6 +1857,7 @@ type Options struct {
     ProxyPort      int      `toml:"proxy_port"`      // default 8080; MUST be >=1024 (NEW-3)
     Audit          bool     `toml:"audit"`           // default true
     CredMount      []string `toml:"cred_mount"`      // §5.7: host paths bound INTO box, RO by default ("~/.codex", "~/.aws:rw")
+    RuntimeMount   []string `toml:"runtime_mount"`   // §5.7: ro toolchain dirs bound at same absolute path
     EnvPassthrough []string `toml:"env_passthrough"` // §5.7/D10: env-name globs copied INTO box
 }
 
@@ -1966,7 +2005,7 @@ cmd := exec.Command("/proc/self/exe", "__init")
 cmd.Args[0] = "cove"
 cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 
-// Directives (dummy envs, base_url rewrites, cred_mounts, CA bytes, agent argv)
+// Directives (dummy envs, base_url rewrites, cred_mounts, runtime_mounts, CA bytes, agent argv)
 // are passed over a PIPE fd, NOT an env var, so they never appear in
 // /proc/<agent>/environ (hygiene). Two more pipes: status (child->parent setup
 // result) and control (parent->child winsize updates).
@@ -2013,7 +2052,7 @@ Translated from `lockbox.c` `setup_deny()` and `setup_netns()`, with the PID-ns
 `/proc` fix and devpts:
 
 Read directives from `COVE_DIR_FD` first (project path, proxy-sock path, session
-id, agent name, dummy envs, base_url rewrites, cred_mounts, CA bytes, agent
+id, agent name, dummy envs, base_url rewrites, cred_mounts, runtime_mounts, CA bytes, agent
 argv). On ANY failure below, write `ERR <stage> <errno>` to `COVE_STATUS_FD` and
 exit — never continue with weaker isolation.
 
@@ -2052,6 +2091,11 @@ exit — never continue with weaker isolation.
        mkdirs(dst-parent); mount(m.path, dst,"", MS_BIND|MS_REC,"")
        if !m.rw: mount("", dst,"", MS_BIND|MS_REMOUNT|MS_RDONLY|MS_REC,"")  // DEFAULT ro (N5); :rw opts out
        warn("credential %s mounted INTO box %s (exfil-contained, not theft-proof)", m.path, m.rw?"read-write UNSAFE-concurrent":"read-only")
+9b. for dir in runtime_mounts:  // §3.3 step 9b — ro toolchains only, never HOME
+       dst := root+dir          // same absolute path inside the box
+       mkdirs(dst-parent); mount(dir, dst,"", MS_BIND|MS_REC,"")
+       mount("", dst,"", MS_BIND|MS_REMOUNT|MS_RDONLY|MS_NOSUID|MS_NODEV|MS_REC,"")
+       note("runtime %s mounted INTO box read-only at same path", dir)
 10. // MANDATORY pivot_root; chroot FORBIDDEN (B3):
     chdir(root); mkdir(root+"/.oldroot")
     pivot_root(root, root+"/.oldroot"); chdir("/")

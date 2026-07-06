@@ -2,15 +2,20 @@ package box
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 func buildEnv(d Directives) []string {
+	path := "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	if prefixes := runtimePathPrefixes(d.RuntimeMount); len(prefixes) > 0 {
+		path = strings.Join(append(prefixes, path), ":")
+	}
 	env := []string{
 		"HOME=/root",
 		"USER=root",
 		"LOGNAME=root",
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"PATH=" + path,
 		"TMPDIR=/tmp",
 		"LANG=C.UTF-8",
 		"NODE_EXTRA_CA_CERTS=/etc/ssl/certs/cove-ca.pem",
@@ -56,6 +61,26 @@ func buildEnv(d Directives) []string {
 		}
 	}
 	return env
+}
+
+func runtimePathPrefixes(mounts []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, mount := range mounts {
+		dir := filepath.Clean(mount)
+		if filepath.Base(dir) != "bin" {
+			bin := filepath.Join(dir, "bin")
+			if st, err := os.Stat(bin); err == nil && st.IsDir() {
+				dir = bin
+			}
+		}
+		if dir == "." || dir == string(filepath.Separator) || seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		out = append(out, dir)
+	}
+	return out
 }
 
 func itoa(n int) string {

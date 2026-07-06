@@ -131,6 +131,13 @@ func buildDirectives(cfg *config.Config, opts Opts, project, proxySock string) (
 	if err != nil {
 		return box.Directives{}, err
 	}
+	runtimeMounts, err := resolveRuntimeMounts(opts.AgentArgv[0], cfg.Options.RuntimeMount)
+	if err != nil {
+		return box.Directives{}, err
+	}
+	for _, m := range runtimeMounts {
+		fmt.Fprintf(os.Stderr, "cove: runtime %s is mounted INTO the box read-only at the same path\n", m)
+	}
 	return box.Directives{
 		Project:        project,
 		ProxySock:      proxySock,
@@ -144,6 +151,7 @@ func buildDirectives(cfg *config.Config, opts Opts, project, proxySock string) (
 		CABundlePEM:    bundle,
 		Inject:         inject,
 		CredMount:      creds,
+		RuntimeMount:   runtimeMounts,
 		EnvPassthrough: env,
 	}, nil
 }

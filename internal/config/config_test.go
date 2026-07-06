@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestSeedValidates(t *testing.T) {
 	cfg, err := LoadBytes([]byte(DefaultConfig))
@@ -68,6 +71,16 @@ func TestValidateRejectsBroadCredMountAndEnvPassthrough(t *testing.T) {
 		{"cred dot", `[options]` + "\n" + `cred_mount = ["."]`},
 		{"cred glob", `[options]` + "\n" + `cred_mount = ["~/.config/*"]`},
 		{"cred bad suffix", `[options]` + "\n" + `cred_mount = ["~/.codex:ro"]`},
+		{"runtime star", `[options]` + "\n" + `runtime_mount = ["*"]`},
+		{"runtime tilde", `[options]` + "\n" + `runtime_mount = ["~"]`},
+		{"runtime tilde slash", `[options]` + "\n" + `runtime_mount = ["~/"]`},
+		{"runtime root", `[options]` + "\n" + `runtime_mount = ["/"]`},
+		{"runtime home root", `[options]` + "\n" + `runtime_mount = ["/home"]`},
+		{"runtime slash root", `[options]` + "\n" + `runtime_mount = ["/root"]`},
+		{"runtime etc", `[options]` + "\n" + `runtime_mount = ["/etc"]`},
+		{"runtime parent", `[options]` + "\n" + `runtime_mount = [".."]`},
+		{"runtime glob", `[options]` + "\n" + `runtime_mount = ["~/.nvm/*"]`},
+		{"runtime rw suffix", `[options]` + "\n" + `runtime_mount = ["~/.nvm:rw"]`},
 		{"env star", `[options]` + "\n" + `env_passthrough = ["*"]`},
 		{"env tilde", `[options]` + "\n" + `env_passthrough = ["~"]`},
 		{"env root", `[options]` + "\n" + `env_passthrough = ["/"]`},
@@ -84,16 +97,29 @@ func TestValidateRejectsBroadCredMountAndEnvPassthrough(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsRuntimeMountHomeOrAncestor(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, path := range []string{home, filepath.Dir(home)} {
+		t.Run(path, func(t *testing.T) {
+			if _, err := LoadBytes([]byte(`[options]` + "\n" + `runtime_mount = ["` + path + `"]`)); err == nil {
+				t.Fatalf("expected runtime_mount HOME-or-above rejection for %q", path)
+			}
+		})
+	}
+}
+
 func TestValidateAcceptsEnvPassthroughTrailingGlobAndCredRWSuffix(t *testing.T) {
 	cfg, err := LoadBytes([]byte(`
 [options]
 cred_mount = ["~/.codex:rw"]
+runtime_mount = ["~/.nvm/versions/node/v22.0.0"]
 env_passthrough = ["AWS_*", "EXACT_TOKEN"]
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Options.CredMount) != 1 || len(cfg.Options.EnvPassthrough) != 2 {
+	if len(cfg.Options.CredMount) != 1 || len(cfg.Options.RuntimeMount) != 1 || len(cfg.Options.EnvPassthrough) != 2 {
 		t.Fatalf("options not retained: %+v", cfg.Options)
 	}
 }

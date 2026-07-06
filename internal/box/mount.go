@@ -67,6 +67,11 @@ func buildRoot(d Directives) (string, error) {
 			return "", err
 		}
 	}
+	for _, src := range d.RuntimeMount {
+		if err := bindRuntime(root, src); err != nil {
+			return "", err
+		}
+	}
 	if err := pivot(root); err != nil {
 		return "", err
 	}
@@ -221,6 +226,17 @@ func bindCred(root string, m CredMount) error {
 		if err := syscall.Mount("", dst, "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY|syscall.MS_REC, ""); err != nil {
 			return fmt.Errorf("remount cred ro %s: %w", m.Source, err)
 		}
+	}
+	return nil
+}
+
+func bindRuntime(root, src string) error {
+	if !filepath.IsAbs(src) {
+		return fmt.Errorf("runtime mount %s is not absolute", src)
+	}
+	dst := filepath.Join(root, src)
+	if err := bindRO(src, dst); err != nil {
+		return fmt.Errorf("runtime mount %s: %w", src, err)
 	}
 	return nil
 }

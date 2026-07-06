@@ -48,6 +48,7 @@ secret = "env:TOKEN"
 		},
 		{name: "bare wildcard", body: `allow = ["*"]`},
 		{name: "broad cred mount", body: `[options]` + "\n" + `cred_mount = ["/"]`},
+		{name: "broad runtime mount", body: `[options]` + "\n" + `runtime_mount = ["/"]`},
 		{name: "broad env passthrough", body: `[options]` + "\n" + `env_passthrough = ["*"]`},
 	}
 	for _, tt := range tests {

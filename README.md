@@ -59,6 +59,16 @@ ln -sf "$(pwd)/cove" ~/.local/bin/cove
 
 Requires: `git`, `podman` (rootless).
 
+## Runtime toolchains
+
+For host-installed agent CLIs under nvm/volta/asdf, cove auto-resolves the
+agent and `node` from your shell `PATH` and read-only mounts the narrow
+toolchain directory into the box at the same absolute path. The box never mounts
+your HOME. If auto-resolution misses a custom layout, add a narrow
+`options.runtime_mount = ["~/.nvm/versions/node/v22.0.0"]` entry. Installing the
+tool under `/usr/local/bin` is the max-isolation path and needs no runtime
+mount.
+
 ## What's inside
 
 Node 22, Python 3 + uv, Go, Rust, Java 25 + GraalVM, .NET 9, Erlang/Elixir, OCaml, Claude Code, Codex, Kimi Code, gh, ripgrep, fzf, jq, git-delta, vim, zsh.

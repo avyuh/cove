@@ -25,6 +25,7 @@ type Options struct {
 	ProxyPort      int      `toml:"proxy_port"`
 	Audit          bool     `toml:"audit"`
 	CredMount      []string `toml:"cred_mount"`
+	RuntimeMount   []string `toml:"runtime_mount"`
 	EnvPassthrough []string `toml:"env_passthrough"`
 }
 
@@ -135,6 +136,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("proxy_port must be >=1024; the shim binds it after CAP_NET_BIND_SERVICE is dropped")
 	}
 	if err := validateCredMounts(c.Options.CredMount); err != nil {
+		return err
+	}
+	if err := validateRuntimeMounts(c.Options.RuntimeMount); err != nil {
 		return err
 	}
 	if err := validateEnvPassthrough(c.Options.EnvPassthrough); err != nil {
@@ -305,6 +309,37 @@ func validateCredMounts(entries []string) error {
 	return nil
 }
 
+func validateRuntimeMounts(entries []string) error {
+	home, _ := os.UserHomeDir()
+	for _, e := range entries {
+		if strings.Contains(e, "*") {
+			return fmt.Errorf("runtime_mount %q is too broad", e)
+		}
+		if strings.HasSuffix(e, ":rw") {
+			return fmt.Errorf("runtime_mount %q is read-only only; use PATH without :rw", e)
+		}
+		path := e
+		if strings.HasPrefix(path, "~/") {
+			path = filepath.Join(home, strings.TrimPrefix(path, "~/"))
+		}
+		clean := filepath.Clean(path)
+		if path == "" || clean == "." || clean == "~" || clean == "/" ||
+			clean == "/home" || clean == "/root" || clean == "/etc" {
+			return fmt.Errorf("runtime_mount %q is too broad", e)
+		}
+		if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("runtime_mount %q is too broad", e)
+		}
+		if filepath.IsAbs(clean) && home != "" {
+			homeClean := filepath.Clean(home)
+			if sameOrAncestor(clean, homeClean) {
+				return fmt.Errorf("runtime_mount %q must not be HOME or an ancestor of HOME", e)
+			}
+		}
+	}
+	return nil
+}
+
 func validateEnvPassthrough(entries []string) error {
 	for _, e := range entries {
 		if e == "" || e == "*" {
@@ -321,4 +356,14 @@ func validateEnvPassthrough(entries []string) error {
 		}
 	}
 	return nil
+}
+
+func sameOrAncestor(path, child string) bool {
+	path = filepath.Clean(path)
+	child = filepath.Clean(child)
+	if path == child {
+		return true
+	}
+	rel, err := filepath.Rel(path, child)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
