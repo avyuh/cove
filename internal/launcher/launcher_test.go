@@ -50,6 +50,47 @@ func TestRunBadProjectReturns66BeforeProxy(t *testing.T) {
 	}
 }
 
+func TestPreflightUsernsProbeSuccessProceedsWithoutProfile(t *testing.T) {
+	oldProbe := probeUsernsSelf
+	t.Cleanup(func() {
+		probeUsernsSelf = oldProbe
+	})
+	called := false
+	probeUsernsSelf = func() error {
+		called = true
+		return nil
+	}
+
+	if err := preflightUserns(); err != nil {
+		t.Fatalf("preflightUserns() error = %v, want nil", err)
+	}
+	if !called {
+		t.Fatal("probe did not run")
+	}
+}
+
+func TestPreflightUsernsProbeFailureReturns77Guidance(t *testing.T) {
+	oldProbe := probeUsernsSelf
+	t.Cleanup(func() {
+		probeUsernsSelf = oldProbe
+	})
+	probeUsernsSelf = func() error {
+		return os.ErrPermission
+	}
+
+	err := preflightUserns()
+	exitErr, ok := err.(ExitError)
+	if !ok {
+		t.Fatalf("err = %T, want ExitError", err)
+	}
+	if exitErr.Code != 77 {
+		t.Fatalf("ExitError.Code = %d, want 77", exitErr.Code)
+	}
+	if !strings.Contains(exitErr.Msg, "run `cove setup`") {
+		t.Fatalf("guidance missing from error: %q", exitErr.Msg)
+	}
+}
+
 func TestParseCredMounts(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

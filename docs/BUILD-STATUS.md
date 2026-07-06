@@ -60,7 +60,7 @@ F streaming, G error paths). Rules:
 | M6 | Full proxy/config: base_url rewrites, kimi plain-HTTP loopback, cred_mount/env_passthrough, all seed stanzas, Validate() | §3.7b, §3.8, §5 (all), §9/M6, §12.1 | Kimi flow works via dynamic-port `KIMI_BASE_URL` loopback with injected key; each seed inject stanza round-trips against a stub upstream; config with host in both allow+inject fails to load; embedded seed passes `Validate()` (§15.1 B1 test) | DONE |
 | M7 | Lifecycle/robustness: auto-spawn + PING/PONG, flock singleton, SIGHUP reload, per-session sockets/REGISTER, crash sweep, fail-closed, audit rotation | §3.9, §4.1, §4.10, §9/M7 | Kill proxy mid-session → egress fails closed; next run auto-spawns fresh proxy; 20 concurrent sessions all proxy correctly (20/20 200s); no leaked `/tmp/cove-root.*` or `sessions/*.sock` after `kill -9` of a launcher | DONE |
 | RT | RUNTIME-PATH (owner Option A): resolve agent+node on host, RO-bind the minimal toolchain/node-version-root at same path + box PATH, HOME-guard, `runtime_mount` escape hatch; supersedes M4 temp-copy | §3.3, §3.8, §5.7, §1.6 | `cove -- claude` resolves + runs vs real nvm install; bait/HOME still ABSENT + fail-closed + allow-opaque + mount EROFS after the runtime mount | DONE |
-| M8 | `cove log` verb + docs/positioning copy | §6.4, §8.4, §9/M8 | `cove log --follow --deny-only` shows denials live; filters (`--session`, `--host`) work; forbidden-positioning string check passes | IN PROGRESS |
+| M8 | `cove log` verb + docs/positioning copy | §6.4, §8.4, §9/M8 | `cove log --follow --deny-only` shows denials live; filters (`--session`, `--host`) work; forbidden-positioning string check passes | DONE |
 
 Ship gate (§9): M3 solid + M4 proven → shippable; M5–M8 harden and complete.
 Unit tests per §15.1 land with their milestone (config/allowlist → M6 or
@@ -69,7 +69,7 @@ per §15.1, or earlier with the h1-inject code). Full acceptance =
 `scripts/e2e.sh` (§15.2) PLUS the per-milestone TESTPLAN tests (standing-bar
 section above) AND the final TESTER A–G sweep below.
 
-**TEST (final gate, TODO) — adversarial A–G sweep on the box (after M8):**
+**TEST (final gate, IN PROGRESS) — adversarial A–G sweep on the box (after M8):**
 B security invariants EXECUTED (bait-absent, ENETUNREACH, CapBnd==CapEff==0,
 NoNewPrivs:1, no `/.oldroot`, audit-unforgeable, CA-key-absent-in-box,
 allow-path-not-terminated), C 20–30 concurrent, D fail-closed + kill-9 no-leaks

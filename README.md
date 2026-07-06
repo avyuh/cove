@@ -74,6 +74,20 @@ your HOME. If auto-resolution misses a custom layout, add a narrow
 tool under `/usr/local/bin` is the max-isolation path and needs no runtime
 mount.
 
+## Codex ChatGPT Auth
+
+Codex's ChatGPT login uses session files under `~/.codex`. To run current Codex
+CLI versions through cove, opt in explicitly:
+
+```toml
+[options]
+cred_mount = ["~/.codex:rw"]
+```
+
+The seed default remains `cred_mount = []`, and plain credential mounts remain
+read-only. Use `:rw` for Codex only after accepting that concurrent cove Codex
+sessions and host-side Codex can race while writing the same auth file.
+
 ## What's inside
 
 Node 22, Python 3 + uv, Go, Rust, Java 25 + GraalVM, .NET 9, Erlang/Elixir, OCaml, Claude Code, Codex, Kimi Code, gh, ripgrep, fzf, jq, git-delta, vim, zsh.

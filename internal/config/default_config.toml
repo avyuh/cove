@@ -6,6 +6,9 @@ tmp_size = "256m"
 proxy_port = 8080
 audit = true
 cred_mount = []
+# Codex ChatGPT auth currently needs cred_mount = ["~/.codex:rw"] because the
+# CLI writes under ~/.codex during init. The default for plain cred_mount entries
+# remains read-only; use :rw only after accepting the concurrency tradeoff.
 # Extra read-only toolchain dirs to mount at the same absolute path in the box.
 # Usually empty: cove auto-resolves nvm/volta/asdf-installed agent runtimes.
 # System-installing tools under /usr/local/bin needs no runtime_mount.

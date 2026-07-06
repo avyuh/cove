@@ -22,6 +22,7 @@ import (
 
 	"cove/internal/box"
 	"cove/internal/config"
+	"cove/internal/setup"
 	"cove/internal/version"
 )
 
@@ -39,6 +40,12 @@ type ExitError struct {
 	Msg  string
 }
 
+const usernsDeniedMessage = "cove: user namespaces denied; run `cove setup` (needs sudo, once)"
+
+var (
+	probeUsernsSelf = setup.ProbeUsernsSelf
+)
+
 func (e ExitError) Error() string {
 	return e.Msg
 }
@@ -51,6 +58,9 @@ func Run(cfg *config.Config, opts Opts) (int, error) {
 	project, err := resolveProject(opts.Project)
 	if err != nil {
 		return 66, ExitError{Code: 66, Msg: err.Error()}
+	}
+	if err := preflightUserns(); err != nil {
+		return 77, err
 	}
 	if err := sweepRoots(false); err != nil && opts.Verbose {
 		fmt.Fprintf(os.Stderr, "cove: cleanup warning: %v\n", err)
@@ -221,7 +231,7 @@ func spawnInit(d box.Directives, verbose bool) (int, error) {
 	}
 	if err := cmd.Start(); err != nil {
 		if errors.Is(err, syscall.EPERM) {
-			return 77, ExitError{Code: 77, Msg: "cove: user namespaces denied; run `cove setup` (needs sudo, once)"}
+			return 77, usernsDeniedError()
 		}
 		return 75, err
 	}
@@ -273,6 +283,17 @@ func spawnInit(d box.Directives, verbose bool) (int, error) {
 		}
 	}
 	return 1, err
+}
+
+func preflightUserns() error {
+	if err := probeUsernsSelf(); err != nil {
+		return usernsDeniedError()
+	}
+	return nil
+}
+
+func usernsDeniedError() ExitError {
+	return ExitError{Code: 77, Msg: usernsDeniedMessage}
 }
 
 func initStatusFailure(line string) (int, error) {

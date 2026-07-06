@@ -143,11 +143,21 @@ profile cove %s flags=(unconfined) {
 }
 
 func ProbeUsernsSelf() error {
-	cmd := exec.Command("/bin/true")
+	if os.Getenv("COVE_PROBE_USERNS_MOUNT_CHILD") == "1" {
+		if err := syscall.Mount("", "/", "", uintptr(syscall.MS_REC|syscall.MS_PRIVATE), ""); err != nil {
+			return fmt.Errorf("mount / MS_REC|MS_PRIVATE: %w", err)
+		}
+		return nil
+	}
+
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		exe = "/proc/self/exe"
+	}
+	cmd := exec.Command(exe, "__probe_userns")
+	cmd.Env = append(os.Environ(), "COVE_PROBE_USERNS_MOUNT_CHILD=1")
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS |
-			syscall.CLONE_NEWPID | syscall.CLONE_NEWNET |
-			syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS,
+		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNS,
 		UidMappings: []syscall.SysProcIDMap{{
 			ContainerID: 0,
 			HostID:      os.Getuid(),

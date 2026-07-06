@@ -971,7 +971,7 @@ audit      = true        # audit log on/off (default true)
 # relative path under box HOME (/root). These credentials DO enter the box.
 # Mounted READ-ONLY by default (N5); append ":rw" to allow in-place token refresh
 # (unsafe under concurrent sessions — §5.7). Empty by default (nothing enters box).
-cred_mount = []          # e.g. ["~/.codex", "~/.config/gh"]  (both read-only)
+cred_mount = []          # e.g. ["~/.codex:rw", "~/.config/gh"] for codex/gh
 
 # Runtime toolchain dirs mounted read-only at the SAME absolute path (§3.3 step
 # 9b). Usually empty: cove auto-resolves nvm/volta/asdf-installed agent
@@ -1091,7 +1091,7 @@ env_passthrough = []     # e.g. AWS_* for aws/s5cmd SigV4 (§5.7)
 # ── ALLOW: opaque-tunnel hosts (credential lives in the box, exfil-contained) ──
 # NOTE: no host here also appears in an [[inject]] stanza below (B1 de-conflict).
 allow = [
-  # codex (ChatGPT OAuth, class B) — needs cred_mount ["~/.codex"] to authenticate
+  # codex (ChatGPT OAuth, class B) — needs cred_mount ["~/.codex:rw"] to initialize/authenticate
   "chatgpt.com", "auth.openai.com",
   # gemini Google OAuth (class B) — needs cred_mount ["~/.gemini"]; API-key mode is inject below
   "accounts.google.com", "oauth2.googleapis.com", "cloudcode-pa.googleapis.com",
@@ -1213,11 +1213,10 @@ Notes baked into the seed:
   `HTTPS_PROXY`; kimi is rescued by `KIMI_BASE_URL` plain-HTTP loopback.
 - **codex/gemini-OAuth/gh/aws are `allow` but need a `cred_mount`/`env_passthrough`
   to authenticate** (§5.7); the seed leaves those empty so nothing enters the box
-  until the user opts in. To make codex work at low friction, the user sets
-  `cred_mount = ["~/.codex"]` once (read-only default) — frictionless until the
-  ChatGPT OAuth token expires, at which point a one-time host-side re-login
-  refreshes it for all sessions (or use `"~/.codex:rw"` for in-place refresh,
-  unsafe under heavy concurrency — §5.7).
+  until the user opts in. To make current Codex CLI versions work, the user sets
+  `cred_mount = ["~/.codex:rw"]` once. This is an explicit writable credential
+  mount, so the §5.7 concurrency caveat applies: concurrent cove Codex sessions
+  and host-side Codex can race while writing the same auth file.
 
 ### 5.6 Adding a new CLI with zero code
 
@@ -1246,13 +1245,16 @@ deny-by-default box stays secret-free until the user consciously opts in.
 - **`cred_mount` (session FILES):** a list in `[options]` of host paths
   bind-mounted into the box at the **same relative path under the box HOME
   (`/root`)**. Examples:
-  - `~/.codex` → `/root/.codex` (codex ChatGPT OAuth: `auth.json`, refresh)
+  - `~/.codex:rw` → `/root/.codex` (codex ChatGPT OAuth: current Codex CLI
+    writes under this dir during init)
   - `~/.config/gh` → `/root/.config/gh` (gh OAuth `hosts.yml`)
   - `~/.gemini` → `/root/.gemini` (gemini Google OAuth)
   - `~/.aws` → `/root/.aws` (aws/s5cmd SigV4 profiles)
   - **DEFAULT IS READ-ONLY (N5).** A plain entry (`"~/.codex"`) mounts
-    **read-only**. To permit in-place token refresh, the user must explicitly
-    append `:rw` (`"~/.codex:rw"`). Mount mechanics: §3.3 step 9a.
+    **read-only**. Current Codex CLI versions fail during init on a read-only
+    `~/.codex` mount because they create local path aliases/app-server state
+    there. To permit those writes, the user must explicitly append `:rw`
+    (`"~/.codex:rw"`). Mount mechanics: §3.3 step 9a.
   - **Concurrency safety (N5):** every `cove -- codex` session `:rw`-binding the
     SAME host `~/.codex/auth.json` (one inode), plus any host-side `codex`, can
     race on concurrent OAuth refresh-writes and **corrupt the shared token**.
@@ -1296,13 +1298,13 @@ toolchain directory and read-only same-path mode.
 
 **Friction reconciliation (§1.6):** the kill metric is bare-`claude`/`codex`
 count. claude works at zero config (Class-A inject, seed default). codex works
-after a **one-time** `cred_mount = ["~/.codex"]` edit — then `cove -- codex` is a
-frictionless reflex **until the ChatGPT OAuth token expires**, at which point the
-read-only mount cannot refresh it in place and a **one-time host-side re-login**
-(run `codex` once on the host) refreshes the token for all sessions. Users who
-prefer in-place refresh set `"~/.codex:rw"` (unsafe under heavy concurrency,
-§5.7). That periodic re-login is acceptable friction; running codex with NO
-containment mechanism would have been the DOA failure B4 flagged.
+after a **one-time** `cred_mount = ["~/.codex:rw"]` edit. This keeps the
+ChatGPT session in the box and egress-bounded while allowing current Codex CLI
+init writes. The cost is the N5 concurrency caveat: every cove Codex session
+`:rw`-binding the same host `~/.codex/auth.json`, plus any host-side Codex, can
+race on refresh writes. Users should avoid concurrent writable Codex sessions
+until the deferred per-session copy-in/copy-out design exists. Running codex
+with NO containment mechanism would have been the DOA failure B4 flagged.
 
 ---
 
@@ -2381,13 +2383,13 @@ cove log --host api.anthropic.com | tail -1 | grep -q '"status":200'
 echo "PASS: claude 200 via h2 MITM strip+inject; dummy x-api-key stripped; token never in box"
 
 # 5. CODEX works via cred_mount (B4). One-time config edit assumed:
-#    cred_mount = ["~/.codex"] (read-only default) in ~/.config/cove/config.toml.
-#    Assumes the host-side ChatGPT token is currently valid; if expired, re-login
-#    with `codex` on the host once (the :ro mount cannot refresh it in place — N5).
+#    cred_mount = ["~/.codex:rw"] in ~/.config/cove/config.toml.
+#    Assumes the host-side ChatGPT token is currently valid. The writable mount is
+#    needed by current Codex CLI init; avoid concurrent writable Codex sessions (N5).
 cove -- codex exec 'reply with exactly: CODEX-OK' | tee /tmp/cove_codex_out
-grep -q "CODEX-OK" /tmp/cove_codex_out || { echo "FAIL: codex did not complete (token expired? re-login on host)"; exit 1; }
+grep -q "CODEX-OK" /tmp/cove_codex_out || { echo "FAIL: codex did not complete"; exit 1; }
 cove log --host chatgpt.com | tail -1 | grep -q '"policy":"allow"'
-echo "PASS: codex works (session cred_mounted read-only, egress-contained)"
+echo "PASS: codex works (session cred_mounted read-write, egress-contained)"
 
 echo "ALL E2E CHECKS PASSED"
 ```
@@ -2502,7 +2504,7 @@ against the review list: all B/M/C/Minor items are fixed in place; none deferred
   `cred_mount` bind-mount mechanism (files) + `env_passthrough` (env creds) in a
   new §5.7, §3.3 step 9a, config schema (§5.3/§12.1), with a mandatory in-box
   warning. Reconciled §1.6/§5.2/§5.6/D10/§8.2. codex now works after a one-time
-  `cred_mount=["~/.codex"]` edit; E2E step 5 proves it.
+  `cred_mount=["~/.codex:rw"]` edit; E2E step 5 proves it.
 - **B5 — setup privilege split:** §7.3 rewritten — only the AppArmor write+parse
   runs as root; CA/config/state are created as the invoking user (via
   `SUDO_UID`/`getpwuid`, recommended pre-escalation) with explicit owners/modes;
@@ -2634,10 +2636,10 @@ Status target: IMPLEMENTABLE-AS-IS.
 ## 19. REVISION LOG (R3)
 
 Five trivial non-gating nits from the IMPLEMENTABLE-AS-IS review, each fixed:
-- **NEW-1** (honesty): the three "frictionless forever" codex references (§5.7
-  friction reconciliation, §5.5 seed note, E2E step 5) now agree with the
-  `:ro`-default cost — frictionless until the ChatGPT OAuth token expires, then a
-  one-time host re-login (or `:rw`, unsafe under concurrency).
+- **NEW-1** (honesty): the codex references (§5.7 friction reconciliation,
+  §5.5 seed note, E2E step 5) now agree with observed Codex CLI behavior:
+  current Codex needs `cred_mount = ["~/.codex:rw"]` to initialize, and that
+  explicit writable mount carries the N5 concurrency caveat.
 - **NEW-2** (audit accuracy): `allow` records are now emitted **at tunnel close**
   with final byte counts + duration (only `deny` is immediate); §12.3 and §4.4
   agree.

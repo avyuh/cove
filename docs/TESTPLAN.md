@@ -43,7 +43,7 @@ must be **exercised on a real box**, not asserted in prose.
 
 ## E. REAL-AGENT E2E (the point of the tool)
 - claude (M4 + runtime path): `cove -- claude -p "reply with exactly: COVE-OK"` resolves from the host nvm/volta/asdf install via the read-only runtime mount, returns `COVE-OK`, and `cove log --host api.anthropic.com` shows `POST /v1/messages status 200`; **grep the box for the token prefix → absent** (key never in box); confirm x-api-key dummy was stripped.
-- codex: resolves from the host runtime path; with `cred_mount ["~/.codex"]`, runs contained through allow hosts (chatgpt.com/auth.openai.com); token in box but egress-bounded (can't exfil to an off-allowlist host). If the ChatGPT token is expired, record that as an ops residual, not a runtime-path code failure.
+- codex: resolves from the host runtime path; with `cred_mount ["~/.codex:rw"]`, runs contained through allow hosts (chatgpt.com/auth.openai.com); token in box but egress-bounded (can't exfil to an off-allowlist host). The writable mount is required by current Codex CLI init and carries the §5.7 concurrency caveat. If the ChatGPT token is expired, record that as an ops residual, not a runtime-path code failure.
 - kimi: runs via `KIMI_BASE_URL` plain-HTTP loopback with injected key (no MITM).
 - git/gh: clone/push work through the allow hosts + registries.
 

@@ -405,13 +405,10 @@ b6_ca_key_absent() {
   snippet="$(awk 'NR == 2 {print; exit}' "$ca_key")"
   snippet_q="$(sq "$snippet")"
   box_eval "set -eu
-set +e
-grep -R -F ${snippet_q} /etc /root /run /proxy /tmp >/tmp/keygrep.out 2>/tmp/keygrep.err
-rc=\$?
-set -e
+matches=\"\$(find / \\( -path /proc -o -path /sys -o -path /dev \\) -prune -o -type f -print0 | xargs -0 grep -I -F -l -- ${snippet_q} 2>/tmp/keygrep.err || true)\"
 cat /tmp/keygrep.err || true
-echo \"grep_rc=\$rc\"
-test ! -s /tmp/keygrep.out
+printf 'ca_key_prefix_matches=%s\n' \"\$matches\"
+test -z \"\$matches\"
 test -s /etc/ssl/certs/cove-ca.pem
 test -s /etc/ssl/certs/cove-ca-bundle.pem
 test \"\$(wc -c </etc/ssl/certs/cove-ca-bundle.pem)\" -gt \"\$(wc -c </etc/ssl/certs/cove-ca.pem)\"
