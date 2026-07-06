@@ -1,115 +1,154 @@
 # cove
 
-cove is a credential firewall for locally run AI coding agents. It runs
-contained agent sessions with no host HOME mount and sends outbound HTTPS
-through a host-side proxy for allow/deny policy, credential injection, and audit
-records.
+A credential firewall for AI coding agents run with permissions off.
 
-## Supported tools
+## The problem
 
-- **Claude Code** (`cove claude`) — runs with `--dangerously-skip-permissions`
-- **Codex** (`cove codex`) — runs with `--yolo`
-- **Kimi Code** (`cove kimi`) — runs with `--yolo`
+An agent running unsupervised with permissions skipped has your shell: it can
+read `~/.ssh`, `~/.aws/credentials`, `~/.claude/.credentials.json`, and every
+other project's `.env`, then POST them to any host on the internet. One
+prompt-injected web page in its context is enough. The agents' built-in
+sandboxes block so much legitimate work — package installs, git pushes, API
+calls — that most people disable them, which is how the keys got exposed in the
+first place.
 
-All tools launch in fully autonomous mode by default. cove limits blast radius by
-keeping the agent inside the mounted workspace and narrow configured mounts, not
-the rest of your host.
+## How it works
 
-## Usage
+`cove -- <agent>` runs the agent in an ephemeral Linux namespace box
+(user/mount/pid/net — unprivileged, no root, no Docker, no daemon to manage).
+Three mechanisms:
 
-```bash
-cove claude                    # Claude Code in current directory
-cove codex                     # Codex in current directory
-cove kimi                      # Kimi Code in current directory
-cove claude ~/project          # Run in a specific directory
-cove claude --resume           # Pass args through to the tool
-cove shell                     # Interactive shell (no AI tool)
-cove claude -e MY_KEY=secret   # Pass extra env vars
-```
+- **Secrets are absent, not blocked.** The box gets an empty tmpfs HOME at
+  `/root`. Host HOME, dotfiles, `~/.ssh`, `~/.aws` are simply not mounted — an
+  agent cannot read what does not exist. Only the project directory enters the
+  box, bind-mounted read-write at `/work`.
+- **One network door.** The box's network namespace has only loopback; the sole
+  route out is a unix socket to a proxy on the host. The proxy tunnels traffic
+  to hosts on your `allow` list and refuses everything else. A tool that
+  ignores proxy settings gets `ENETUNREACH` — it fails closed.
+- **Keys injected host-side.** For hosts with an `[[inject]]` stanza, the proxy
+  terminates TLS (using cove's own CA, trusted only inside the box) and adds
+  your real API key to each request. The agent holds a dummy
+  (`cove-dummy-do-not-use`); the real key never enters the box, so it cannot be
+  stolen there.
 
-## GPU support
-
-```bash
-cove build gpu-amd                   # Build the AMD GPU variant
-COVE_IMAGE=gpu-amd cove claude       # Run with GPU access
-export COVE_IMAGE=gpu-amd            # Or set once in shell profile
-```
-
-Requires AMD GPU with ROCm support. Device passthrough (`/dev/kfd`, `/dev/dri`) is automatic. The GPU image includes ROCm 7.1.1, ollama, and GPU-relevant dev tools. Default image is unaffected — GPU base is only pulled when you build it.
-
-## Management
-
-```bash
-cove build                     # Build/rebuild container image
-cove build gpu-amd             # Build a specific variant
-cove upgrade                   # Pull latest and rebuild all images
-cove ps                        # List running coves
-cove stop <name>               # Stop a cove
-cove exec <name>               # Attach to running cove
-```
+Every request gets a JSONL audit record with its verdict: `allow`, `inject`, or
+`deny`.
 
 ## Install
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/avyuh/cove/master/install.sh | bash
+Linux only; built and tested on Ubuntu 24.04. Needs Go to build.
+
+```sh
+go build -o cove ./cmd/cove
+sudo install -m0755 cove /usr/local/bin/cove
+sudo cove setup
 ```
 
-Or manually:
+`cove setup` is one-time and idempotent. The only step that needs root is
+installing an AppArmor profile for `/usr/local/bin/cove` — Ubuntu 24.04 blocks
+unprivileged user namespaces by default, and the profile grants them to cove
+the same way Podman and bwrap do (on distros where userns already works, the
+step is skipped). As your user, setup generates cove's CA, creates
+`~/.config/cove/config.toml` from the seed if absent, and prints which inject
+secrets are still unpopulated.
 
-```bash
-git clone <repo> && cd cove
-./cove build
-ln -sf "$(pwd)/cove" ~/.local/bin/cove
+## Run
+
+```sh
+cove -- claude -p "summarize this repo"
+cove -C ~/src/app -- codex exec "run the tests"
+cove --dry-run -- claude     # print the launch plan, run nothing
 ```
 
-Requires: `git`, `podman` (rootless).
+`cove -- <agent>` is a drop-in for `<agent>`: same TTY behavior, argv passed
+verbatim after `--`, the agent's own exit code propagated. The project (cwd, or
+`-C DIR`) appears read-write at `/work`, the agent's starting directory; edits
+are real host files owned by your uid. On exit the box is destroyed — nothing
+persists except `/work` and the audit log.
 
-## Runtime toolchains
+Agents installed via nvm, volta, or asdf are auto-resolved and their toolchain
+directory mounted read-only at its own absolute path; the rest of HOME stays
+absent. Agents installed under `/usr/local/bin` need nothing. Other cases:
+`runtime_mount` in the config. `-v` prints launcher diagnostics; `--no-audit`
+skips audit records for one run.
 
-For host-installed agent CLIs under nvm/volta/asdf, cove auto-resolves the
-agent and `node` from your shell `PATH` and read-only mounts the narrow
-toolchain directory into the box at the same absolute path. The box never mounts
-your HOME. If auto-resolution misses a custom layout, add a narrow
-`options.runtime_mount = ["~/.nvm/versions/node/v22.0.0"]` entry. Installing the
-tool under `/usr/local/bin` is the max-isolation path and needs no runtime
-mount.
+## Credentials, per tool
 
-## Codex ChatGPT Auth
+| Tool | You do | Real key in the box? |
+|---|---|---|
+| Claude Code | Nothing — a logged-in `claude` works immediately | No. The proxy reads the OAuth token from host `~/.claude/.credentials.json` per request and injects it. If it expires, run `claude` on the host once to re-login. |
+| Codex (ChatGPT login) | Add `cred_mount = ["~/.codex:rw"]` to the config | Yes — the login writes under `~/.codex`, so it must be mounted. Egress is still bounded to `chatgpt.com` / `auth.openai.com`. |
+| OpenAI API | Key into `~/.config/cove/secrets/openai-api-key` | No — injected |
+| Kimi | `~/.config/cove/secrets/kimi-api-key` | No — injected |
+| Gemini (API key) | `~/.config/cove/secrets/gemini-api-key` | No — injected |
+| Hugging Face | `~/.config/cove/secrets/hf-token` | No — injected |
+| Hetzner | `~/.config/cove/secrets/hcloud-token` | No — injected |
+| Cloudflare | `~/.config/cove/secrets/cloudflare-token` | No — injected |
+| RunPod | `~/.config/cove/secrets/runpod-key` | No — injected |
 
-Codex's ChatGPT login uses session files under `~/.codex`. To run current Codex
-CLI versions through cove, opt in explicitly:
+A missing secret file does not break anything: the stanza degrades to a plain
+allowed tunnel (anonymous Hugging Face downloads still work) and cove warns
+once.
 
-```toml
-[options]
-cred_mount = ["~/.codex:rw"]
+Other OAuth logins follow the Codex pattern: `gh`, gemini's Google login, and
+wrangler already have their hosts in the seed allow list; add a `cred_mount`
+for the session dir (`~/.config/gh`, `~/.gemini`, `~/.wrangler`).
+
+## Reading the audit trail
+
+```sh
+cove log                          # every request: allow / inject / deny
+cove log --follow --deny-only     # watch denials live
+cove log --session 1a2b3c4d --host api.anthropic.com
 ```
 
-The seed default remains `cred_mount = []`, and plain credential mounts remain
-read-only. Use `:rw` for Codex only after accepting that concurrent cove Codex
-sessions and host-side Codex can race while writing the same auth file.
+Flags compose. The log is JSONL at `~/.local/state/cove/audit.log`
+(`$XDG_STATE_HOME` respected); `--follow` survives rotation and truncation;
+half-written trailing lines are skipped.
 
-## What's inside
+## Config
 
-Node 22, Python 3 + uv, Go, Rust, Java 25 + GraalVM, .NET 9, Erlang/Elixir, OCaml, Claude Code, Codex, Kimi Code, gh, ripgrep, fzf, jq, git-delta, vim, zsh.
+`~/.config/cove/config.toml`. Adding a tool is config, not code.
 
-## Trust boundary
+- `allow = [...]` — hosts the box may reach as opaque tunnels; whatever
+  credential the agent holds is used as-is, exfil-contained by this list. Exact
+  hosts or leftmost wildcards (`*.hf.co`). The seed includes GitHub, npm, PyPI,
+  the Go module proxy, crates.io, and the Hugging Face CDNs, so installs and
+  clones work out of the box.
+- `[[inject]]` — one stanza per host whose key the proxy adds:
+  `header_name`/`header_template` (`Bearer {secret}`), a `secret` reference
+  (`file:`, `env:`, or `json:path#dotted.field` — the Claude stanza reads
+  `json:~/.claude/.credentials.json#claudeAiOauth.accessToken`), `dummy_env`
+  for the placeholder the agent sees, and `base_url_env` to point the client at
+  the proxy.
+- `cred_mount = ["~/.codex:rw", ...]` — host dirs mounted into the box HOME for
+  logins that cannot be injected. Read-only unless `:rw`; `:rw` lets the tool
+  refresh its own token but is unsafe under concurrent sessions on the same
+  dir.
+- `runtime_mount` — extra toolchain dirs, read-only, same path as on the host.
+- `env_passthrough` — env vars copied into the box, e.g. `AWS_*` for SigV4
+  tools like `aws` and `s5cmd`, which sign requests with the secret and
+  therefore cannot use header injection.
 
-cove is a **credential firewall** for **contained agent sessions**. It is meant
-to keep host credentials out of the agent's filesystem and force network egress
-through the proxy/audit path. It does not stop misuse of an allowed credential at
-an allowed host, and it is not a defense against kernel escape.
+A host must be in `allow` or `[[inject]]`, never both; cove validates the
+config and rejects conflicts at startup.
 
-**What tools CAN access:**
-- Workspace directory (read-write)
-- Narrow configured credential/runtime mounts
-- Dummy API-key environment variables for proxy-injected services
-- Allowed or injected HTTPS hosts through the cove proxy
-- Git worktree parent repo metadata needed for the mounted workspace
+## What cove stops, and what it does not
 
-**What tools CANNOT access:**
-- Home directory outside configured narrow mounts
-- `~/.ssh`, `~/.gnupg`, browser cookies, and unrelated host credentials
-- Other projects outside the mounted workspace
-- Arbitrary network destinations denied by policy
+cove stops credential **theft** (Class-A keys are never in the box; host
+dotfiles are absent) and **exfiltration** (the only egress is to hosts you
+listed). It runs *contained agent sessions* — it is not a secure sandbox, and
+these residuals are real:
 
-**npm scripts** are disabled by default (`NPM_CONFIG_IGNORE_SCRIPTS=true`) as a supply chain hardening measure. Override per-install with `npm install --ignore-scripts=false` when a package needs postinstall scripts.
+- **Misuse at an allowed host.** An agent with the injected Anthropic key can
+  still spend your API quota; one with your `gh` login can still push to your
+  own repos. Injection cannot distinguish a legitimate request from a malicious
+  one at the same host. `cove log` is the only mitigation.
+- **Mounted credentials are readable.** A `cred_mount`ed session file (Codex,
+  `gh`) is in the box by necessity: exfil-contained by the allow list, but not
+  hidden from the agent.
+- **Kernel escape.** The box is namespaces, not a hypervisor or gVisor. A
+  kernel exploit that breaks the user/mount/net namespace defeats cove.
+- **The project itself.** `/work` is fully in the agent's power — deleting or
+  corrupting your working tree is within its granted authority. Use git.
