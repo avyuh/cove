@@ -20,7 +20,7 @@ F streaming, G error paths). Rules:
   A(full config/secret/allowlist tables) + E(kimi loopback, codex cred_mount) +
   negative-config-fails-load; M7 → C(20–30 concurrent) + D(kill-proxy fail-closed,
   kill-9 no leaks, SIGHUP reload, audit rotation); M8 → cove log filters
-  (`--follow`/`--deny-only`/`--session`/`--host`) + no "secure sandbox" string.
+  (`--follow`/`--deny-only`/`--session`/`--host`) + forbidden-positioning string check.
 - **Thin/vacuous tests are a reviewer BLOCKER.** Each milestone gate:
   `go test ./... -count=1` green + `go vet` clean + its TESTPLAN tests, before commit.
 - **M0–M3 backfill gate:** when the in-flight M1–M3 run lands, if its tests are
@@ -60,7 +60,7 @@ F streaming, G error paths). Rules:
 | M6 | Full proxy/config: base_url rewrites, kimi plain-HTTP loopback, cred_mount/env_passthrough, all seed stanzas, Validate() | §3.7b, §3.8, §5 (all), §9/M6, §12.1 | Kimi flow works via dynamic-port `KIMI_BASE_URL` loopback with injected key; each seed inject stanza round-trips against a stub upstream; config with host in both allow+inject fails to load; embedded seed passes `Validate()` (§15.1 B1 test) | DONE |
 | M7 | Lifecycle/robustness: auto-spawn + PING/PONG, flock singleton, SIGHUP reload, per-session sockets/REGISTER, crash sweep, fail-closed, audit rotation | §3.9, §4.1, §4.10, §9/M7 | Kill proxy mid-session → egress fails closed; next run auto-spawns fresh proxy; 20 concurrent sessions all proxy correctly (20/20 200s); no leaked `/tmp/cove-root.*` or `sessions/*.sock` after `kill -9` of a launcher | DONE |
 | RT | RUNTIME-PATH (owner Option A): resolve agent+node on host, RO-bind the minimal toolchain/node-version-root at same path + box PATH, HOME-guard, `runtime_mount` escape hatch; supersedes M4 temp-copy | §3.3, §3.8, §5.7, §1.6 | `cove -- claude` resolves + runs vs real nvm install; bait/HOME still ABSENT + fail-closed + allow-opaque + mount EROFS after the runtime mount | DONE |
-| M8 | `cove log` verb + docs/positioning copy | §6.4, §8.4, §9/M8 | `cove log --follow --deny-only` shows denials live; filters (`--session`, `--host`) work; NO string anywhere says "secure sandbox" | TODO |
+| M8 | `cove log` verb + docs/positioning copy | §6.4, §8.4, §9/M8 | `cove log --follow --deny-only` shows denials live; filters (`--session`, `--host`) work; forbidden-positioning string check passes | IN PROGRESS |
 
 Ship gate (§9): M3 solid + M4 proven → shippable; M5–M8 harden and complete.
 Unit tests per §15.1 land with their milestone (config/allowlist → M6 or

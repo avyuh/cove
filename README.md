@@ -1,6 +1,9 @@
 # cove
 
-Rootless Podman container for running AI coding tools in fully autonomous mode.
+cove is a credential firewall for locally run AI coding agents. It runs
+contained agent sessions with no host HOME mount and sends outbound HTTPS
+through a host-side proxy for allow/deny policy, credential injection, and audit
+records.
 
 ## Supported tools
 
@@ -8,7 +11,9 @@ Rootless Podman container for running AI coding tools in fully autonomous mode.
 - **Codex** (`cove codex`) — runs with `--yolo`
 - **Kimi Code** (`cove kimi`) — runs with `--yolo`
 
-All tools launch in fully autonomous mode by default. The container limits blast radius — tools can only access the mounted workspace and config directories, not the rest of your host.
+All tools launch in fully autonomous mode by default. cove limits blast radius by
+keeping the agent inside the mounted workspace and narrow configured mounts, not
+the rest of your host.
 
 ## Usage
 
@@ -75,20 +80,22 @@ Node 22, Python 3 + uv, Go, Rust, Java 25 + GraalVM, .NET 9, Erlang/Elixir, OCam
 
 ## Trust boundary
 
-The container is **not** a security sandbox. It limits blast radius, not access.
+cove is a **credential firewall** for **contained agent sessions**. It is meant
+to keep host credentials out of the agent's filesystem and force network egress
+through the proxy/audit path. It does not stop misuse of an allowed credential at
+an allowed host, and it is not a defense against kernel escape.
 
 **What tools CAN access:**
 - Workspace directory (read-write)
-- `~/.claude`, `~/.codex`, `~/.kimi` (auth/config, read-write)
-- `~/.gitconfig` (read-only)
-- API keys passed via environment
-- Full network access
-- Git worktree parent repo (if workspace is a worktree)
+- Narrow configured credential/runtime mounts
+- Dummy API-key environment variables for proxy-injected services
+- Allowed or injected HTTPS hosts through the cove proxy
+- Git worktree parent repo metadata needed for the mounted workspace
 
 **What tools CANNOT access:**
-- Home directory (beyond the above)
-- `~/.ssh`, `~/.gnupg`, host credentials
+- Home directory outside configured narrow mounts
+- `~/.ssh`, `~/.gnupg`, browser cookies, and unrelated host credentials
 - Other projects outside the mounted workspace
-- Host system files, other containers
+- Arbitrary network destinations denied by policy
 
 **npm scripts** are disabled by default (`NPM_CONFIG_IGNORE_SCRIPTS=true`) as a supply chain hardening measure. Override per-install with `npm install --ignore-scripts=false` when a package needs postinstall scripts.

@@ -170,11 +170,20 @@ func usage() {
   cove proxyd
   cove log [--follow] [--session ID] [--host HOST] [--deny-only]
 
+cove runs contained agent sessions behind a credential firewall. The agent gets
+the workspace and configured mounts; outbound HTTPS goes through the cove proxy
+for allow/deny policy, credential injection, and audit records.
+
 flags:
   -C, --project DIR   project mounted at /work (default: cwd)
       --no-audit      disable audit for this run
   -v, --verbose       print launcher diagnostics
       --dry-run       print launch plan and exit
       --version       show version
+
+examples:
+  cove -- claude -p "summarize this repo"
+  cove -C ~/src/project -- codex exec "run the tests"
+  cove log --deny-only --host evil.example.com
 `)
 }

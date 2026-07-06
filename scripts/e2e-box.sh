@@ -2,7 +2,9 @@
 set -euo pipefail
 
 COVE_BIN="${COVE_BIN:-/usr/local/bin/cove}"
+GO_BIN="${GO_BIN:-/usr/local/go/bin/go}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORK="$(mktemp -d)"
 failures=0
 created_bait=()
@@ -95,6 +97,21 @@ wait_for_path() {
     sleep 0.05
   done
   echo "timed out waiting for $path"
+  return 1
+}
+
+wait_file_contains() {
+  local path="$1"
+  local pattern="$2"
+  local i
+  for i in $(seq 1 100); do
+    if [[ -e "$path" ]] && grep -F "$pattern" "$path" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "timed out waiting for $pattern in $path"
+  [[ -e "$path" ]] && sed 's/^/  /' "$path"
   return 1
 }
 
@@ -510,6 +527,102 @@ e_log_filters() {
   ! grep -F '"policy":"allow"' "$WORK/deny-only.log" >/dev/null
 }
 
+m8_log_filters_seeded() {
+  local state="$WORK/m8-log-state"
+  local audit="$state/cove/audit.log"
+  rm -rf "$state"
+  mkdir -p "$(dirname "$audit")"
+  cat >"$audit" <<'JSONL'
+{"ts":"2026-07-05T00:00:00Z","session":"aaa11111","policy":"allow","host":"pypi.org","port":443,"bytes_up":1,"bytes_down":2,"dur_ms":3}
+{"ts":"2026-07-05T00:00:00Z","session":"bbb22222","policy":"deny","host":"evil.example.com","port":443,"status":403,"bytes_up":0,"bytes_down":0,"dur_ms":0}
+{"ts":"2026-07-05T00:00:00Z","session":"aaa11111","policy":"deny","host":"evil.example.com","port":443,"status":403,"bytes_up":0,"bytes_down":0,"dur_ms":0}
+{"ts":"2026-07-05T00:00:00Z","session":"ccc33333","policy":"allow","host":"evil.example.com","port":443,"bytes_up":4,"bytes_down":5,"dur_ms":6}
+{"ts":
+JSONL
+  env XDG_STATE_HOME="$state" "$COVE_BIN" log --deny-only >"$WORK/m8-deny-only.log"
+  env XDG_STATE_HOME="$state" "$COVE_BIN" log --session aaa11111 >"$WORK/m8-session.log"
+  env XDG_STATE_HOME="$state" "$COVE_BIN" log --host evil.example.com >"$WORK/m8-host.log"
+  env XDG_STATE_HOME="$state" "$COVE_BIN" log --deny-only --session aaa11111 --host evil.example.com >"$WORK/m8-composed.log"
+  python3 - "$WORK/m8-deny-only.log" "$WORK/m8-session.log" "$WORK/m8-host.log" "$WORK/m8-composed.log" <<'PY'
+import json, sys
+
+def load(path):
+    records = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            records.append(json.loads(line))
+    return records
+
+deny, session, host, composed = map(load, sys.argv[1:5])
+checks = [
+    ("deny-only", len(deny) == 2 and all(r.get("policy") == "deny" for r in deny)),
+    ("session", len(session) == 2 and all(r.get("session") == "aaa11111" for r in session)),
+    ("host", len(host) == 3 and all(r.get("host") == "evil.example.com" for r in host)),
+    ("composed", len(composed) == 1 and composed[0].get("policy") == "deny" and composed[0].get("session") == "aaa11111" and composed[0].get("host") == "evil.example.com"),
+]
+for name, ok in checks:
+    print(f"{name}={ok}")
+    if not ok:
+        sys.exit(1)
+PY
+}
+
+m8_log_follow_append_rotate() {
+  local state="$WORK/m8-follow-state"
+  local audit="$state/cove/audit.log"
+  local out="$WORK/m8-follow.out"
+  local err="$WORK/m8-follow.err"
+  local pid rc
+  rm -rf "$state"
+  mkdir -p "$(dirname "$audit")"
+  : >"$audit"
+  env XDG_STATE_HOME="$state" "$COVE_BIN" log --follow --deny-only >"$out" 2>"$err" &
+  pid=$!
+  rc=0
+  {
+    sleep 0.2
+    printf '%s\n' '{"ts":"2026-07-05T00:00:00Z","session":"aaa11111","policy":"allow","host":"pypi.org","port":443,"bytes_up":1,"bytes_down":2,"dur_ms":3}' >>"$audit"
+    sleep 0.2
+    ! grep -F 'pypi.org' "$out" >/dev/null 2>&1
+    printf '%s\n' '{"ts":"2026-07-05T00:00:00Z","session":"bbb22222","policy":"deny","host":"follow-deny.example.com","port":443,"status":403,"bytes_up":0,"bytes_down":0,"dur_ms":0}' >>"$audit"
+    wait_file_contains "$out" 'follow-deny.example.com'
+    mv "$audit" "$audit.1"
+    printf '%s\n' '{"ts":"2026-07-05T00:00:00Z","session":"ccc33333","policy":"deny","host":"follow-rotated.example.com","port":443,"status":403,"bytes_up":0,"bytes_down":0,"dur_ms":0}' >"$audit"
+    wait_file_contains "$out" 'follow-rotated.example.com'
+    : >"$audit"
+    sleep 0.2
+    printf '%s\n' '{"ts":"2026-07-05T00:00:00Z","session":"ddd44444","policy":"deny","host":"follow-truncated.example.com","port":443,"status":403,"bytes_up":0,"bytes_down":0,"dur_ms":0}' >>"$audit"
+    wait_file_contains "$out" 'follow-truncated.example.com'
+    test "$(grep -c 'follow-deny.example.com' "$out")" = "1"
+  } || rc=$?
+  kill "$pid" >/dev/null 2>&1 || true
+  wait "$pid" >/dev/null 2>&1 || true
+  if [[ $rc -ne 0 ]]; then
+    sed 's/^/follow-stdout: /' "$out" || true
+    sed 's/^/follow-stderr: /' "$err" || true
+    return "$rc"
+  fi
+  sed 's/^/follow: /' "$out"
+}
+
+m8_no_forbidden_positioning_phrase() {
+  local needle bin
+  needle="$(printf '%s %s' sec'ure' sand'box')"
+  bin="$WORK/cove-strings-check"
+  (cd "$REPO_ROOT" && "$GO_BIN" build -o "$bin" ./cmd/cove)
+  if strings "$bin" | grep -i -F "$needle" >"$WORK/m8-binary-strings.out"; then
+    sed 's/^/binary: /' "$WORK/m8-binary-strings.out"
+    return 1
+  fi
+  (cd "$REPO_ROOT" && grep -R -I -n -i -F "$needle" README.md install.sh cmd internal docs/*.md --exclude='SPEC.md' >"$WORK/m8-source-strings.out") || true
+  if [[ -s "$WORK/m8-source-strings.out" ]]; then
+    sed 's/^/source: /' "$WORK/m8-source-strings.out"
+    return 1
+  fi
+  echo "binary_strings_forbidden_phrase=0"
+  echo "source_strings_forbidden_phrase=0"
+}
+
 e_claude_runtime_positive() {
   command -v claude >/dev/null || { echo "host claude missing from PATH"; return 1; }
   [[ -s "$HOME/.claude/.credentials.json" ]] || { echo "host Claude OAuth credentials missing"; return 1; }
@@ -871,6 +984,9 @@ check RT-B7-allow-opaque rt_b7_allow_opaque
 check RT-read-only-EROFS rt_read_only_erofs
 check E-pypi-allow-audit e_pypi_allow_audit
 check E-log-filters e_log_filters
+check M8-log-filters-seeded m8_log_filters_seeded
+check M8-log-follow-append-rotate m8_log_follow_append_rotate
+check M8-no-forbidden-positioning-phrase m8_no_forbidden_positioning_phrase
 check E-claude-runtime-positive e_claude_runtime_positive
 check G-exit-codes g_exit_codes
 check M5-non-tty-pipe non_tty_pipe

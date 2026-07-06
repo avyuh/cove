@@ -1,3 +1,6 @@
+# cove is a credential firewall for contained agent sessions.
+# Keep host secrets out of the box; allow/inject rules decide audited egress.
+
 [options]
 tmp_size = "256m"
 proxy_port = 8080
