@@ -43,9 +43,13 @@ func Add(args []string) error {
 	if len(args) == 0 {
 		return clierr.Wrap(clierr.EXUsage, "add requires a service", nil, "cove help add", nil)
 	}
-	for _, a := range args {
-		if a == "--secret" || a == "--token" || a == "--key" || a == "--pat" {
-			return clierr.Wrap(clierr.EXUsage, "secrets cannot be passed as command-line arguments", nil, "use --secret-stdin --yes", nil)
+	// mtls takes --cert/--key as file PATHS (not secret contents), so the
+	// literal-secret guard does not apply to it.
+	if args[0] != "mtls" {
+		for _, a := range args {
+			if a == "--secret" || a == "--token" || a == "--key" || a == "--pat" {
+				return clierr.Wrap(clierr.EXUsage, "secrets cannot be passed as command-line arguments", nil, "use --secret-stdin --yes", nil)
+			}
 		}
 	}
 	if args[0] == "token" {
@@ -56,6 +60,9 @@ func Add(args []string) error {
 	}
 	if args[0] == "codex-login" {
 		return addCodexLogin(args[1:])
+	}
+	if args[0] == "mtls" {
+		return addMTLS(args[1:])
 	}
 	s, ok := services[args[0]]
 	if !ok {
@@ -287,6 +294,20 @@ func removeAllowNames(in []config.NamedAllow, names ...string) []config.NamedAll
 	return out
 }
 
+func removeMTLSNames(in []config.MTLSStanza, names ...string) []config.MTLSStanza {
+	out := in[:0]
+	for _, x := range in {
+		found := false
+		for _, n := range names {
+			found = found || x.Name == n
+		}
+		if !found {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
 func addGitHubOAuth(cfg *config.Config, yes bool) error {
 	preview := "GitHub OAuth credential becomes readable in the box. It remains exfiltration-bounded by GitHub policies.\nhosts: github.com, api.github.com\nundo: cove remove github\n"
 	if err := confirmMutation(preview, yes); err != nil {
@@ -374,6 +395,11 @@ func Remove(args []string) error {
 			found = true
 		}
 	}
+	for _, x := range cfg.Managed.MTLS {
+		if x.Name == name {
+			found = true
+		}
+	}
 	if !found {
 		return clierr.Wrap(clierr.EXUsage, "unknown or manual connection "+name, nil, "cove list", nil)
 	}
@@ -400,14 +426,126 @@ func Remove(args []string) error {
 				blockPresentBase(cfg, m, "allow", x.Host)
 			}
 		}
+		for _, x := range m.MTLS {
+			if x.Name == name {
+				blockPresentBase(cfg, m, "allow", x.Host)
+				blockMTLSBase(cfg, m, x.Host)
+			}
+		}
 		m.Inject = removeInjectNames(m.Inject, name)
 		m.Allow = removeAllowNames(m.Allow, name)
+		m.MTLS = removeMTLSNames(m.MTLS, name)
 		m.Expose = removeExposeNames(m.Expose, name)
 		return nil
 	}); err != nil {
 		return err
 	}
 	fprint(commandOutput, "removed: "+name+"; stored, disabled\n")
+	return nil
+}
+
+func blockMTLSBase(cfg *config.Config, m *config.ManagedConfig, host string) {
+	for _, st := range cfg.MTLS {
+		if st.Name != "" || !samePolicyHost(st.Host, host) {
+			continue
+		}
+		for _, b := range m.Block {
+			if b.Kind == "mtls" && b.Host == host {
+				return
+			}
+		}
+		m.Block = append(m.Block, config.PolicyRef{Kind: "mtls", Host: host})
+		return
+	}
+}
+
+type mtlsAllowValues []string
+
+func (v *mtlsAllowValues) String() string { return strings.Join(*v, ",") }
+func (v *mtlsAllowValues) Set(value string) error {
+	*v = append(*v, value)
+	return nil
+}
+
+func addMTLS(args []string) error {
+	if len(args) == 0 {
+		return clierr.Wrap(clierr.EXUsage, "mtls requires HOST, --cert, --key, and --allow", nil, "cove help add", nil)
+	}
+	host := args[0]
+	fs := flag.NewFlagSet("cove add mtls", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	certPath := fs.String("cert", "", "PEM certificate path")
+	keyPath := fs.String("key", "", "PEM private key path")
+	yes := fs.Bool("yes", false, "skip confirmation")
+	var allows mtlsAllowValues
+	fs.Var(&allows, "allow", "METHOD /path/*")
+	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 || *certPath == "" || *keyPath == "" || len(allows) == 0 {
+		return clierr.Wrap(clierr.EXUsage, "mtls requires HOST, --cert, --key, and --allow", nil, "cove help add", err)
+	}
+	rules := make([]config.MTLSRule, 0, len(allows))
+	for _, value := range allows {
+		rule, err := parseMTLSAllow(value)
+		if err != nil {
+			return clierr.Wrap(clierr.EXUsage, "invalid mTLS --allow", nil, "use --allow 'GET /v1/reports/*'", err)
+		}
+		rules = append(rules, rule)
+	}
+	cfg, err := config.Load("")
+	if err != nil {
+		return err
+	}
+	p, err := compileMTLS(host, *certPath, *keyPath, rules, cfg)
+	if err != nil {
+		code := clierr.EXConfig
+		if strings.Contains(err.Error(), "file is missing") {
+			code = clierr.EXNoInput
+		}
+		return clierr.Wrap(code, "cannot add mTLS", nil, "provide a valid PEM certificate/key pair", err)
+	}
+	if err := confirmMutation(previewMTLSPlan(p), *yes); err != nil {
+		return clierr.Wrap(clierr.EXUsage, "add was not confirmed", nil, "rerun with --yes", err)
+	}
+	if err := commitMTLSPlan(context.Background(), p); err != nil {
+		return err
+	}
+	fprint(commandOutput, "saved: "+p.Name+"\nundo: cove remove "+p.Name+"\n")
+	return nil
+}
+
+func parseMTLSAllow(value string) (config.MTLSRule, error) {
+	parts := strings.Split(value, " ")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || parts[0] != strings.ToUpper(parts[0]) {
+		return config.MTLSRule{}, errors.New("must be exactly uppercase METHOD, one space, and PATH")
+	}
+	path := parts[1]
+	if strings.Contains(path, "*") {
+		if !strings.HasSuffix(path, "/*") || strings.Count(path, "*") != 1 {
+			return config.MTLSRule{}, errors.New("only a trailing /* wildcard is supported")
+		}
+		path = strings.TrimSuffix(path, "*")
+	}
+	if err := validateMTLSPath(path); err != nil {
+		return config.MTLSRule{}, err
+	}
+	return config.MTLSRule{Method: parts[0], PathPrefix: path}, nil
+}
+
+// Keep command-side rejection aligned with config.Validate so malformed input
+// is rejected before confirmation; the managed editor validates again before
+// committing, which remains the authoritative safety boundary.
+func validateMTLSPath(path string) error {
+	if !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "?#\\") || strings.Contains(path, "//") {
+		return errors.New("must be a clean absolute path")
+	}
+	lower := strings.ToLower(path)
+	if strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
+		return errors.New("contains encoded separator")
+	}
+	for _, segment := range strings.Split(strings.TrimSuffix(path, "/"), "/") {
+		if segment == "." || segment == ".." {
+			return errors.New("contains traversal")
+		}
+	}
 	return nil
 }
 
