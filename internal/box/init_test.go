@@ -86,6 +86,26 @@ func TestBuildEnvInjectBaseURLDummyAndPassthrough(t *testing.T) {
 	}
 }
 
+func TestBuildEnvAppliesGenericDummyEnvWithoutHostAWSSecret(t *testing.T) {
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "real-host-secret-must-not-cross")
+	env := envMap(buildEnv(Directives{DummyEnv: map[string]string{
+		"AWS_ACCESS_KEY_ID":         "COVE0000000000000000",
+		"AWS_SECRET_ACCESS_KEY":     "cove-dummy-secret-access-key-do-not-use",
+		"AWS_SESSION_TOKEN":         "cove-dummy-session-token-do-not-use",
+		"AWS_EC2_METADATA_DISABLED": "true",
+	}}))
+	for key, want := range map[string]string{
+		"AWS_ACCESS_KEY_ID":         "COVE0000000000000000",
+		"AWS_SECRET_ACCESS_KEY":     "cove-dummy-secret-access-key-do-not-use",
+		"AWS_SESSION_TOKEN":         "cove-dummy-session-token-do-not-use",
+		"AWS_EC2_METADATA_DISABLED": "true",
+	} {
+		if got := env[key]; got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
 func TestBuildEnvPrependsRuntimeMountBinToPath(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "bin"), 0755); err != nil {
@@ -95,6 +115,50 @@ func TestBuildEnvPrependsRuntimeMountBinToPath(t *testing.T) {
 	wantPrefix := filepath.Join(root, "bin") + string(os.PathListSeparator)
 	if !strings.HasPrefix(env["PATH"], wantPrefix) {
 		t.Fatalf("PATH = %q, want prefix %q", env["PATH"], wantPrefix)
+	}
+}
+
+func TestBuildEnvGitHubDummyCredentialConfig(t *testing.T) {
+	t.Setenv("GIT_CONFIG_COUNT", "99")
+	t.Setenv("GIT_CONFIG_KEY_0", "credential.helper=host")
+	t.Setenv("GIT_CONFIG_VALUE_0", "host-secret")
+	env := buildEnv(Directives{Inject: []InjectDirective{{
+		Transform: "github-basic", DummyValue: "dummy-only-value",
+	}}})
+	got := envMap(env)
+	for key, want := range map[string]string{
+		"GIT_CONFIG_COUNT":    "2",
+		"GIT_CONFIG_KEY_0":    "credential.https://github.com.helper",
+		"GIT_CONFIG_KEY_1":    "credential.https://github.com.useHttpPath",
+		"GIT_CONFIG_VALUE_1":  "true",
+		"GIT_TERMINAL_PROMPT": "0",
+	} {
+		if got[key] != want {
+			t.Fatalf("%s = %q, want %q", key, got[key], want)
+		}
+	}
+	helper := got["GIT_CONFIG_VALUE_0"]
+	if !strings.Contains(helper, "[ \"$op\" = get ]") || !strings.Contains(helper, "protocol") || !strings.Contains(helper, "github.com") {
+		t.Fatalf("helper lacks get-only github HTTPS guard: %q", helper)
+	}
+	if !strings.Contains(helper, "dummy-only-value") || strings.Contains(helper, "host-secret") {
+		t.Fatalf("helper dummy/host secret content = %q", helper)
+	}
+	for _, item := range env {
+		if strings.HasPrefix(item, "GIT_CONFIG_KEY_2=") || strings.HasPrefix(item, "GIT_CONFIG_VALUE_2=") {
+			t.Fatalf("unexpected command-scope index in %q", item)
+		}
+	}
+}
+
+func TestAppendGitHubDummyCredentialConfigAccountsForExistingEntries(t *testing.T) {
+	env := appendGitHubDummyCredentialConfig([]string{
+		"GIT_CONFIG_KEY_0=existing.one", "GIT_CONFIG_VALUE_0=value",
+		"GIT_CONFIG_KEY_1=existing.two", "GIT_CONFIG_VALUE_1=value",
+	}, []InjectDirective{{Transform: "github-basic"}})
+	got := envMap(env)
+	if got["GIT_CONFIG_COUNT"] != "4" || got["GIT_CONFIG_KEY_2"] != "credential.https://github.com.helper" || got["GIT_CONFIG_KEY_3"] != "credential.https://github.com.useHttpPath" {
+		t.Fatalf("command-scope sequence = %+v", got)
 	}
 }
 

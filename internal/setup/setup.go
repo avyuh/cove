@@ -99,7 +99,8 @@ func Run(args []string) error {
 		return err
 	}
 	configPath := filepath.Join(u.Home, ".config", "cove", "config.toml")
-	if _, err := config.Load(configPath); err != nil {
+	cfg, err := config.Load(configPath)
+	if err != nil {
 		return setupError{code: 78, msg: fmt.Sprintf("seed config did not validate: %v", err)}
 	}
 
@@ -110,7 +111,47 @@ func Run(args []string) error {
 		fmt.Fprintln(os.Stderr, "cove setup: no changes")
 	}
 	fmt.Fprintf(os.Stderr, "cove is ready: userns ok; CA SHA-256 %s; config %s\n", fp, configPath)
+	for _, line := range credentialPostureLines(cfg) {
+		fmt.Fprintf(os.Stderr, "cove setup: %s\n", line)
+	}
 	return nil
+}
+
+// CredentialPostureLines reports credential sources without resolving them.  The
+// references are useful deployment labels; their values must remain host-side.
+func CredentialPostureLines(cfg *config.Config) []string {
+	return credentialPostureLines(cfg)
+}
+
+func credentialPostureLines(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	lines := make([]string, 0, len(cfg.Inject)+len(cfg.SigV4)+len(cfg.MTLS)*2)
+	appendMetadata := func(issuer, maxTTL, bootstrapRef string) {
+		if issuer == "" && maxTTL == "" && bootstrapRef == "" {
+			lines = append(lines, "bootstrap/issuer: not recorded; see docs/SHORT-LIVED-CREDENTIALS.md")
+			return
+		}
+		lines = append(lines, fmt.Sprintf("bootstrap/issuer: issuer=%s max_ttl=%s bootstrap_ref=%s", issuer, maxTTL, bootstrapRef))
+	}
+	for _, st := range cfg.Inject {
+		lines = append(lines, fmt.Sprintf("credential source: inject %s secret=%s (host-side)", st.Host, st.Secret))
+		appendMetadata(st.Issuer, st.MaxTTL, st.BootstrapRef)
+	}
+	for _, st := range cfg.SigV4 {
+		line := fmt.Sprintf("credential source: sigv4 %s access_key_id=%s secret_access_key=%s", st.Host, st.AccessKeyID, st.SecretAccessKey)
+		if st.SessionToken != "" {
+			line += " session_token=" + st.SessionToken
+		}
+		lines = append(lines, line+" (host-side)")
+		appendMetadata(st.Issuer, st.MaxTTL, st.BootstrapRef)
+	}
+	for _, st := range cfg.MTLS {
+		lines = append(lines, fmt.Sprintf("credential source: mtls %s client_cert=%s client_key=%s (host-side)", st.Host, st.ClientCert, st.ClientKey))
+		appendMetadata(st.Issuer, st.MaxTTL, st.BootstrapRef)
+	}
+	return lines
 }
 
 func ApparmorOnly() error {

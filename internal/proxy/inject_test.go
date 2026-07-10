@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,13 +15,16 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"cove/internal/box"
 	"cove/internal/config"
 	"cove/internal/secret"
 
@@ -213,6 +217,98 @@ func TestInjectStripThenInjectH2H1InertAndStreaming(t *testing.T) {
 		}
 		if !strings.Contains(string(rest), "data: two") {
 			t.Fatalf("remaining stream = %q, want second event", rest)
+		}
+	})
+}
+
+func TestInjectPolicyFailuresAuditOnceAndDoNotLeakSecret(t *testing.T) {
+	const host = "api.test"
+	const testSecret = "CARD4-SECRET-MUST-NOT-LEAK"
+	coveCA, covePEM, _ := newTestCA(t)
+	upstreamCA, upstreamPEM := sharedUpstreamTestCA(t)
+	rootPath := filepath.Join(t.TempDir(), "upstream-root.pem")
+	if err := os.WriteFile(rootPath, upstreamPEM, 0644); err != nil {
+		t.Fatal(err)
+	}
+	emptyCertDir := filepath.Join(t.TempDir(), "empty-certs")
+	if err := os.Mkdir(emptyCertDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSL_CERT_FILE", rootPath)
+	t.Setenv("SSL_CERT_DIR", emptyCertDir)
+
+	for _, leg := range []string{"h2", "http/1.1"} {
+		t.Run("deny before dial/"+leg, func(t *testing.T) {
+			var hits atomic.Int32
+			upstream := newInjectUpstream(t, upstreamCA, host, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+			defer upstream.Close()
+			auditPath := filepath.Join(t.TempDir(), "audit.log")
+			audit, err := NewAuditWriter(auditPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := injectConfig(t, host, serverPort(t, upstream.URL), "keyring:unavailable", leg)
+			resp, _, cleanup := requestThroughInjectConfig(t, cfg, injectRequest{Leg: leg, Host: host, Port: serverPort(t, upstream.URL), CoveCA: coveCA, CoveCAPEM: covePEM, ProxyAudit: audit})
+			cleanup()
+			_ = audit.Close()
+			if resp.StatusCode != http.StatusBadGateway {
+				t.Fatalf("status=%d, want 502", resp.StatusCode)
+			}
+			if hits.Load() != 0 {
+				t.Fatalf("upstream hits=%d, want 0", hits.Load())
+			}
+			recs := readAuditRecords(t, auditPath)
+			if len(recs) != 1 || recs[0].Policy != "deny" || recs[0].Reason != "secret_unavailable" {
+				t.Fatalf("records=%+v", recs)
+			}
+		})
+	}
+
+	t.Run("authorized transport failure is inject and secret-free", func(t *testing.T) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer listener.Close()
+		var accepted atomic.Int32
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, err := listener.Accept()
+			if err == nil {
+				accepted.Add(1)
+				_ = c.Close()
+			}
+		}()
+		auditPath := filepath.Join(t.TempDir(), "audit.log")
+		audit, err := NewAuditWriter(auditPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		secretPath := writeSecret(t, testSecret)
+		port := listener.Addr().(*net.TCPAddr).Port
+		resp, _, cleanup := requestThroughInject(t, injectRequest{Leg: "h2", Host: host, Port: port, SecretRef: "file:" + secretPath, CoveCA: coveCA, CoveCAPEM: covePEM, ProxyAudit: audit, ProxyLog: &stderr})
+		cleanup()
+		wg.Wait()
+		_ = audit.Close()
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Fatalf("status=%d, want 502", resp.StatusCode)
+		}
+		if accepted.Load() != 1 {
+			t.Fatalf("authorized transport attempts=%d, want 1", accepted.Load())
+		}
+		recs := readAuditRecords(t, auditPath)
+		if len(recs) != 1 || recs[0].Policy != "inject" || recs[0].Reason != "upstream_tls" {
+			t.Fatalf("records=%+v", recs)
+		}
+		data, err := os.ReadFile(auditPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, []byte(testSecret)) || bytes.Contains(stderr.Bytes(), []byte(testSecret)) {
+			t.Fatal("secret leaked to audit or stderr")
 		}
 	})
 }
@@ -476,11 +572,418 @@ func TestInjectOAuthRefresh401PassesThroughAndWarns(t *testing.T) {
 	}
 }
 
+func TestGitHubBasicTransformH2H1(t *testing.T) {
+	const host = "github.com"
+	const token = "REAL"
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token))
+	coveCA, covePEM, _ := newTestCA(t)
+	upstreamCA, upstreamPEM := sharedUpstreamTestCA(t)
+	rootPath := filepath.Join(t.TempDir(), "upstream-root.pem")
+	if err := os.WriteFile(rootPath, upstreamPEM, 0644); err != nil {
+		t.Fatal(err)
+	}
+	emptyCertDir := filepath.Join(t.TempDir(), "empty-certs")
+	if err := os.Mkdir(emptyCertDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSL_CERT_FILE", rootPath)
+	t.Setenv("SSL_CERT_DIR", emptyCertDir)
+
+	for _, leg := range []string{"h2", "http/1.1"} {
+		for _, tc := range []struct {
+			name    string
+			headers http.Header
+		}{
+			{"dummy", http.Header{"Authorization": {"Basic ZHVtbXk="}, "X-Dummy": {"remove-me"}}},
+			{"probe", nil},
+			{"alternate", http.Header{"Authorization": {"Bearer malicious", "Basic ZHVtbXk="}, "X-Dummy": {"remove-me"}}},
+		} {
+			t.Run(leg+"/"+tc.name, func(t *testing.T) {
+				var authorization, dummy string
+				upstream := newInjectUpstream(t, upstreamCA, host, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					authorization, dummy = r.Header.Get("Authorization"), r.Header.Get("X-Dummy")
+					w.WriteHeader(http.StatusOK)
+				}))
+				defer upstream.Close()
+				secretPath := writeSecret(t, token)
+				cfg := githubBasicConfig(t, serverPort(t, upstream.URL), "file:"+secretPath, leg, []string{"owner/repo"}, []string{"GET", "POST"})
+				auditPath := filepath.Join(t.TempDir(), "audit.log")
+				audit, err := NewAuditWriter(auditPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, _, cleanup := requestThroughInjectConfig(t, cfg, injectRequest{Leg: leg, Host: host, Port: serverPort(t, upstream.URL), Path: "/owner/repo.git/info/refs", Method: http.MethodGet, CoveCA: coveCA, CoveCAPEM: covePEM, Headers: tc.headers, ProxyAudit: audit})
+				cleanup()
+				_ = audit.Close()
+				if resp.StatusCode != http.StatusOK || authorization != want || dummy != "" {
+					t.Fatalf("status/auth/dummy = %d/%q/%q, want 200/%q/empty", resp.StatusCode, authorization, dummy, want)
+				}
+				recs := readAuditRecords(t, auditPath)
+				if len(recs) != 1 || recs[0].AuthMode != "github-basic" || recs[0].Reason != "" {
+					t.Fatalf("unexpected audit records: %+v", recs)
+				}
+			})
+		}
+	}
+}
+
+func TestGitHubBasicRequestGuard(t *testing.T) {
+	allowed := []string{"owner/repo", "org/*"}
+	for _, tc := range []struct {
+		name string
+		path string
+		ok   bool
+	}{
+		{"refs", "/owner/repo.git/info/refs", true},
+		{"upload", "/owner/repo.git/git-upload-pack", true},
+		{"receive", "/owner/repo.git/git-receive-pack", true},
+		{"lfs", "/owner/repo.git/info/lfs/objects/batch", true},
+		{"wildcard", "/org/any.git/info/refs", true},
+		{"other-owner", "/other/repo.git/info/refs", false},
+		{"other-repo", "/owner/other.git/info/refs", false},
+		{"encoded-slash", "/owner%2Frepo.git/info/refs", false},
+		{"traversal", "/owner/%2e%2e.git/info/refs", false},
+		{"malformed-percent", "/owner/repo.git/info/%zz", false},
+		{"web", "/owner/repo", false},
+		{"lfs-root", "/owner/repo.git/info/lfs", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &http.Request{URL: &url.URL{Path: tc.path, RawPath: tc.path}}
+			err := matchGitHubGitRequest(req, allowed)
+			if (err == nil) != tc.ok {
+				t.Fatalf("matchGitHubGitRequest(%q) error = %v, want allowed=%v", tc.path, err, tc.ok)
+			}
+		})
+	}
+
+}
+
+func TestGitHubBasicDenialsAreAudited(t *testing.T) {
+	const host = "github.com"
+	coveCA, covePEM, _ := newTestCA(t)
+	upstreamCA, upstreamPEM := sharedUpstreamTestCA(t)
+	rootPath := filepath.Join(t.TempDir(), "upstream-root.pem")
+	if err := os.WriteFile(rootPath, upstreamPEM, 0644); err != nil {
+		t.Fatal(err)
+	}
+	emptyCertDir := filepath.Join(t.TempDir(), "empty-certs")
+	if err := os.Mkdir(emptyCertDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSL_CERT_FILE", rootPath)
+	t.Setenv("SSL_CERT_DIR", emptyCertDir)
+	for _, tc := range []struct{ name, path, method, reason string }{
+		{"resource", "/owner/other.git/info/refs", http.MethodGet, "policy_resource"},
+		{"method", "/owner/repo.git/info/refs", http.MethodPost, "policy_method"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			upstream := newInjectUpstream(t, upstreamCA, host, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+			defer upstream.Close()
+			secretPath := writeSecret(t, "REAL")
+			cfg := githubBasicConfig(t, serverPort(t, upstream.URL), "file:"+secretPath, "h2", []string{"owner/repo"}, []string{"GET"})
+			auditPath := filepath.Join(t.TempDir(), "audit.log")
+			audit, err := NewAuditWriter(auditPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, _, cleanup := requestThroughInjectConfig(t, cfg, injectRequest{Leg: "h2", Host: host, Port: serverPort(t, upstream.URL), Path: tc.path, Method: tc.method, CoveCA: coveCA, CoveCAPEM: covePEM, ProxyAudit: audit})
+			cleanup()
+			_ = audit.Close()
+			if resp.StatusCode != http.StatusForbidden || called {
+				t.Fatalf("status/called = %d/%v, want 403/false", resp.StatusCode, called)
+			}
+			recs := readAuditRecords(t, auditPath)
+			if len(recs) != 1 || recs[0].Reason != tc.reason || recs[0].AuthMode != "github-basic" {
+				t.Fatalf("unexpected audit records: %+v", recs)
+			}
+		})
+	}
+}
+
+func TestGitHubAPIBearerUsesTemplateInjection(t *testing.T) {
+	secretPath := writeSecret(t, "REAL")
+	st := &config.InjectStanza{
+		HeaderName:     "Authorization",
+		HeaderTemplate: "Bearer {secret}",
+		Secret:         "file:" + secretPath,
+		StripHeaders:   []string{"Authorization"},
+		Transform:      "template",
+	}
+	req := &http.Request{Header: http.Header{"Authorization": {"Bearer dummy"}}}
+	decision, err := newHeaderAuthorizer(st, Target{Host: "api.github.com"}, nil, secret.NewCache(io.Discard)).Authorize(req)
+	if err != nil || !decision.Applied || req.Header.Get("Authorization") != "Bearer REAL" {
+		t.Fatalf("template decision/header/error = %+v/%q/%v", decision, req.Header.Get("Authorization"), err)
+	}
+
+	emptyPath := writeSecret(t, "")
+	st.Secret = "file:" + emptyPath
+	req.Header.Set("Authorization", "Bearer dummy")
+	decision, err = newHeaderAuthorizer(st, Target{Host: "api.github.com"}, nil, secret.NewCache(io.Discard)).Authorize(req)
+	if err != nil || decision.Applied || req.Header.Get("Authorization") != "" {
+		t.Fatalf("empty template decision/header/error = %+v/%q/%v", decision, req.Header.Get("Authorization"), err)
+	}
+}
+
+func TestGitHubBasicEmptySecretForwardsAnonymously(t *testing.T) {
+	emptyPath := writeSecret(t, "")
+	st := &config.InjectStanza{
+		Transform:          "github-basic",
+		HeaderName:         "Authorization",
+		BasicUsername:      "x-access-token",
+		Secret:             "file:" + emptyPath,
+		StripHeaders:       []string{"Authorization"},
+		GitHubRepositories: []string{"owner/repo"},
+		AllowedMethods:     []string{"GET"},
+	}
+	req := &http.Request{Method: http.MethodGet, URL: &url.URL{Path: "/owner/repo.git/info/refs"}, Header: http.Header{"Authorization": {"Basic dummy"}}}
+	decision, err := newHeaderAuthorizer(st, Target{Host: "github.com"}, nil, secret.NewCache(io.Discard)).Authorize(req)
+	if err != nil || decision.Applied || req.Header.Get("Authorization") != "" {
+		t.Fatalf("empty github-basic decision/header/error = %+v/%q/%v", decision, req.Header.Get("Authorization"), err)
+	}
+}
+
+func TestGitHTTPBackendThroughGitHubBasicProxy(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed: " + err.Error())
+	}
+	const dummy = "cove-dummy-do-not-use"
+	const real = "REAL-GITHUB-TOKEN"
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+real))
+
+	root := t.TempDir()
+	repo := filepath.Join(root, "owner", "repo.git")
+	if err := os.MkdirAll(filepath.Dir(repo), 0755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, nil, "init", "--bare", repo)
+	runGit(t, root, nil, "-C", repo, "config", "http.receivepack", "true")
+	seed := filepath.Join(root, "seed")
+	runGit(t, root, nil, "init", seed)
+	runGit(t, seed, nil, "config", "user.email", "test@example.invalid")
+	runGit(t, seed, nil, "config", "user.name", "Cove Test")
+	if err := os.WriteFile(filepath.Join(seed, "README"), []byte("seed\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, seed, nil, "add", "README")
+	runGit(t, seed, nil, "commit", "-m", "seed")
+	runGit(t, seed, nil, "remote", "add", "origin", repo)
+	runGit(t, seed, nil, "push", "origin", "HEAD:main")
+
+	var upstreamAuths []string
+	var upstreamMu sync.Mutex
+	upstreamCA, upstreamPEM := sharedUpstreamTestCA(t)
+	upstream := newInjectUpstream(t, upstreamCA, "github.com", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamMu.Lock()
+		upstreamAuths = append(upstreamAuths, r.Header.Get("Authorization"))
+		upstreamMu.Unlock()
+		if r.Header.Get("Authorization") != wantAuth {
+			w.Header().Set("WWW-Authenticate", `Basic realm="git"`)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		serveGitHTTPBackend(t, root, w, r)
+	}))
+	defer upstream.Close()
+
+	rootPath := filepath.Join(t.TempDir(), "upstream-root.pem")
+	if err := os.WriteFile(rootPath, upstreamPEM, 0644); err != nil {
+		t.Fatal(err)
+	}
+	emptyCertDir := filepath.Join(t.TempDir(), "empty-certs")
+	if err := os.Mkdir(emptyCertDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSL_CERT_FILE", rootPath)
+	t.Setenv("SSL_CERT_DIR", emptyCertDir)
+
+	secretPath := writeSecret(t, real)
+	coveCA, covePEM, _ := newTestCA(t)
+	cfg := githubBasicConfig(t, 443, "file:"+secretPath, "http/1.1", []string{"owner/repo"}, []string{"GET", "POST"})
+	proxyAddr, stopProxy := startGitProxy(t, cfg, coveCA, upstream.URL)
+	defer stopProxy()
+
+	home := filepath.Join(t.TempDir(), "home")
+	if err := os.Mkdir(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	gitEnv := box.BuildEnv(box.Directives{ProxyEnabled: true, ProxyPort: 1, Inject: []box.InjectDirective{{Transform: "github-basic", DummyValue: dummy}}})
+	gitEnv = replaceEnv(gitEnv, "HOME", home)
+	gitEnv = replaceEnv(gitEnv, "HTTPS_PROXY", "http://"+proxyAddr)
+	gitEnv = replaceEnv(gitEnv, "HTTP_PROXY", "http://"+proxyAddr)
+	gitEnv = replaceEnv(gitEnv, "https_proxy", "http://"+proxyAddr)
+	gitEnv = replaceEnv(gitEnv, "http_proxy", "http://"+proxyAddr)
+	covePath := filepath.Join(t.TempDir(), "cove-ca.pem")
+	if err := os.WriteFile(covePath, covePEM, 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitEnv = replaceEnv(gitEnv, "GIT_SSL_CAINFO", covePath)
+	gitEnv = replaceEnv(gitEnv, "SSL_CERT_FILE", covePath)
+	clone := filepath.Join(root, "clone")
+	runGit(t, root, gitEnv, "clone", "https://github.com/owner/repo.git", clone)
+	runGit(t, clone, gitEnv, "config", "user.email", "test@example.invalid")
+	runGit(t, clone, gitEnv, "config", "user.name", "Cove Test")
+	if err := os.WriteFile(filepath.Join(clone, "PUSHED"), []byte("pushed\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, clone, gitEnv, "add", "PUSHED")
+	runGit(t, clone, gitEnv, "commit", "-m", "push")
+	runGit(t, clone, gitEnv, "push", "origin", "HEAD:main")
+
+	for _, operation := range []string{"approve", "reject"} {
+		cmd := exec.Command("git", "credential", operation)
+		cmd.Env = gitEnv
+		cmd.Stdin = strings.NewReader("protocol=https\nhost=github.com\nusername=x-access-token\npassword=" + dummy + "\n\n")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git credential %s: %v: %s", operation, err, out)
+		}
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("credential store/erase persisted in HOME: %+v", entries)
+	}
+	t.Run("empty resolved token propagates upstream 401", func(t *testing.T) {
+		empty := writeSecret(t, "")
+		emptyCfg := githubBasicConfig(t, 443, "file:"+empty, "http/1.1", []string{"owner/repo"}, []string{"GET", "POST"})
+		emptyProxy, stop := startGitProxy(t, emptyCfg, coveCA, upstream.URL)
+		defer stop()
+		env := replaceEnv(gitEnv, "HTTPS_PROXY", "http://"+emptyProxy)
+		env = replaceEnv(env, "HTTP_PROXY", "http://"+emptyProxy)
+		env = replaceEnv(env, "https_proxy", "http://"+emptyProxy)
+		env = replaceEnv(env, "http_proxy", "http://"+emptyProxy)
+		cmd := exec.Command("git", "push", "origin", "HEAD:main")
+		cmd.Dir, cmd.Env = clone, env
+		out, err := cmd.CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "Authentication failed") {
+			t.Fatalf("empty-token git push error/output = %v/%q, want upstream authentication failure", err, out)
+		}
+	})
+	upstreamMu.Lock()
+	defer upstreamMu.Unlock()
+	if len(upstreamAuths) == 0 {
+		t.Fatal("git http-backend received no requests")
+	}
+	sawReal := false
+	for _, got := range upstreamAuths {
+		if strings.Contains(got, dummy) {
+			t.Fatalf("upstream Authorization leaked dummy: %q", got)
+		}
+		if got == wantAuth {
+			sawReal = true
+		}
+	}
+	if !sawReal {
+		t.Fatalf("upstream never received real Basic header: %q", upstreamAuths)
+	}
+}
+
+func runGit(t *testing.T, dir string, env []string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if env != nil {
+		cmd.Env = env
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
+	}
+}
+
+func replaceEnv(env []string, name, value string) []string {
+	prefix := name + "="
+	for i, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
+}
+
+func startGitProxy(t *testing.T, cfg *config.Config, coveCA *CA, upstreamURL string) (string, func()) {
+	t.Helper()
+	upstreamAddr := strings.TrimPrefix(upstreamURL, "https://")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Proxyd{
+		lookupIP: func(context.Context, string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+		},
+		dialTCP: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, upstreamAddr)
+		},
+		log: io.Discard,
+	}
+	var wg sync.WaitGroup
+	done := make(chan struct{})
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				select {
+				case <-done:
+					return
+				default:
+					return
+				}
+			}
+			wg.Add(1)
+			go func(raw net.Conn) {
+				defer wg.Done()
+				(&Conn{raw: raw, br: bufio.NewReader(raw), sess: Session{ID: "git", Agent: "git"}, proxy: p, matcher: NewMatcher(cfg), ca: coveCA, secrets: secret.NewCache(io.Discard), started: time.Now()}).handle()
+			}(conn)
+		}
+	}()
+	return ln.Addr().String(), func() { close(done); _ = ln.Close(); wg.Wait() }
+}
+
+func serveGitHTTPBackend(t *testing.T, root string, w http.ResponseWriter, r *http.Request) {
+	t.Helper()
+	cmd := exec.Command("git", "http-backend")
+	cmd.Env = append(os.Environ(), "GIT_PROJECT_ROOT="+root, "GIT_HTTP_EXPORT_ALL=1", "REQUEST_METHOD="+r.Method, "PATH_INFO="+r.URL.Path, "QUERY_STRING="+r.URL.RawQuery, "CONTENT_TYPE="+r.Header.Get("Content-Type"), "CONTENT_LENGTH="+strconv.FormatInt(r.ContentLength, 10))
+	cmd.Stdin = r.Body
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git http-backend: %v", err)
+	}
+	headEnd := bytes.Index(out, []byte("\r\n\r\n"))
+	if headEnd < 0 {
+		headEnd = bytes.Index(out, []byte("\n\n"))
+	}
+	if headEnd < 0 {
+		t.Fatalf("git http-backend malformed response: %q", out)
+	}
+	head, body := string(out[:headEnd]), out[headEnd+4:]
+	if !strings.Contains(string(out[:headEnd]), "\r\n") {
+		body = out[headEnd+2:]
+	}
+	status := http.StatusOK
+	for _, line := range strings.Split(strings.ReplaceAll(head, "\r\n", "\n"), "\n") {
+		name, value, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(name, "Status") {
+			fmt.Sscanf(strings.TrimSpace(value), "%d", &status)
+			continue
+		}
+		w.Header().Add(strings.TrimSpace(name), strings.TrimSpace(value))
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
 type injectRequest struct {
 	Leg        string
 	Host       string
 	Port       int
 	Path       string
+	Method     string
 	Body       string
 	SecretRef  string
 	CoveCA     *CA
@@ -623,7 +1126,11 @@ func newClientRequest(t *testing.T, req injectRequest) *http.Request {
 	}
 	u.Path = parsedPath.Path
 	u.RawQuery = parsedPath.RawQuery
-	httpReq, err := http.NewRequest(http.MethodPost, u.String(), strings.NewReader(req.Body))
+	method := req.Method
+	if method == "" {
+		method = http.MethodPost
+	}
+	httpReq, err := http.NewRequest(method, u.String(), strings.NewReader(req.Body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -652,6 +1159,35 @@ alpn = %q
 		t.Fatal(err)
 	}
 	return cfg
+}
+
+func githubBasicConfig(t *testing.T, port int, secretRef, alpn string, repositories, methods []string) *config.Config {
+	t.Helper()
+	data := fmt.Sprintf(`
+[[inject]]
+host = %q
+transform = "github-basic"
+header_name = "Authorization"
+basic_username = "x-access-token"
+secret = %q
+strip_headers = ["Authorization", "X-Dummy"]
+github_repositories = [%s]
+allowed_methods = [%s]
+alpn = %q
+`, net.JoinHostPort("github.com", strconv.Itoa(port)), secretRef, tomlStrings(repositories), tomlStrings(methods), alpn)
+	cfg, err := config.LoadBytes([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func tomlStrings(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		quoted = append(quoted, strconv.Quote(value))
+	}
+	return strings.Join(quoted, ", ")
 }
 
 func newInjectUpstream(t *testing.T, ca *CA, host string, h http.Handler) *httptest.Server {

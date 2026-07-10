@@ -6,8 +6,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -16,6 +18,8 @@ type Config struct {
 	Options Options        `toml:"options"`
 	Allow   []string       `toml:"allow"`
 	Inject  []InjectStanza `toml:"inject"`
+	SigV4   []SigV4Stanza  `toml:"sigv4"`
+	MTLS    []MTLSStanza   `toml:"mtls"`
 
 	AllowRules []AllowRule `toml:"-"`
 }
@@ -30,19 +34,59 @@ type Options struct {
 }
 
 type InjectStanza struct {
-	Host           string   `toml:"host"`
-	HeaderName     string   `toml:"header_name"`
-	HeaderTemplate string   `toml:"header_template"`
-	Secret         string   `toml:"secret"`
-	StripHeaders   []string `toml:"strip_headers"`
-	DummyEnv       string   `toml:"dummy_env"`
-	DummyValue     string   `toml:"dummy_value"`
-	BaseURLEnv     string   `toml:"base_url_env"`
-	BaseURLValue   string   `toml:"base_url_value"`
-	ALPN           string   `toml:"alpn"`
-	Mode           string   `toml:"mode"`
+	Host               string   `toml:"host"`
+	HeaderName         string   `toml:"header_name"`
+	HeaderTemplate     string   `toml:"header_template"`
+	Secret             string   `toml:"secret"`
+	StripHeaders       []string `toml:"strip_headers"`
+	DummyEnv           string   `toml:"dummy_env"`
+	DummyValue         string   `toml:"dummy_value"`
+	BaseURLEnv         string   `toml:"base_url_env"`
+	BaseURLValue       string   `toml:"base_url_value"`
+	ALPN               string   `toml:"alpn"`
+	Mode               string   `toml:"mode"`
+	Transform          string   `toml:"transform"`
+	BasicUsername      string   `toml:"basic_username"`
+	GitHubRepositories []string `toml:"github_repositories"`
+	AllowedMethods     []string `toml:"allowed_methods"`
+	Issuer             string   `toml:"issuer"`
+	MaxTTL             string   `toml:"max_ttl"`
+	BootstrapRef       string   `toml:"bootstrap_ref"`
 
 	Port int `toml:"-"`
+}
+
+type SigV4Stanza struct {
+	Host              string   `toml:"host"`
+	AccessKeyID       string   `toml:"access_key_id"`
+	SecretAccessKey   string   `toml:"secret_access_key"`
+	SessionToken      string   `toml:"session_token"`
+	AccountID         string   `toml:"account_id"`
+	Service           string   `toml:"service"`
+	Region            string   `toml:"region"`
+	AllowedMethods    []string `toml:"allowed_methods"`
+	AllowedOperations []string `toml:"allowed_operations"`
+	AllowedResources  []string `toml:"allowed_resources"`
+	AllowUnsigned     bool     `toml:"allow_unsigned_payload"`
+	MaxBodyBytes      int64    `toml:"max_body_bytes"`
+	ALPN              string   `toml:"alpn"`
+	Issuer            string   `toml:"issuer"`
+	MaxTTL            string   `toml:"max_ttl"`
+	BootstrapRef      string   `toml:"bootstrap_ref"`
+	Port              int      `toml:"-"`
+}
+
+type MTLSStanza struct {
+	Host            string   `toml:"host"`
+	ClientCert      string   `toml:"client_cert"`
+	ClientKey       string   `toml:"client_key"`
+	AllowedMethods  []string `toml:"allowed_methods"`
+	AllowedPrefixes []string `toml:"allowed_path_prefixes"`
+	ALPN            string   `toml:"alpn"`
+	Issuer          string   `toml:"issuer"`
+	MaxTTL          string   `toml:"max_ttl"`
+	BootstrapRef    string   `toml:"bootstrap_ref"`
+	Port            int      `toml:"-"`
 }
 
 type AllowRule struct {
@@ -56,6 +100,8 @@ type rawConfig struct {
 	Options rawOptions     `toml:"options"`
 	Allow   []string       `toml:"allow"`
 	Inject  []InjectStanza `toml:"inject"`
+	SigV4   []SigV4Stanza  `toml:"sigv4"`
+	MTLS    []MTLSStanza   `toml:"mtls"`
 }
 
 type rawOptions struct {
@@ -93,6 +139,8 @@ func LoadBytes(data []byte) (*Config, error) {
 		Options: raw.Options.Options,
 		Allow:   raw.Allow,
 		Inject:  raw.Inject,
+		SigV4:   raw.SigV4,
+		MTLS:    raw.MTLS,
 	}
 	if len(cfg.Allow) == 0 && len(raw.Options.Allow) > 0 {
 		cfg.Allow = raw.Options.Allow
@@ -145,6 +193,7 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	claims := map[string]string{}
 	allowSeen := map[string]string{}
 	rules := make([]AllowRule, 0, len(c.Allow))
 	for _, raw := range c.Allow {
@@ -157,11 +206,12 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("duplicate allow rules %q and %q", prev, raw)
 		}
 		allowSeen[key] = raw
+		claims[key] = "allow"
 		rules = append(rules, r)
 	}
 	c.AllowRules = rules
 
-	injectSeen := map[string]string{}
+	dummyValues := map[string]string{}
 	for i := range c.Inject {
 		st := &c.Inject[i]
 		r, err := ParseRule(st.Host)
@@ -169,37 +219,439 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("inject host %q: %w", st.Host, err)
 		}
 		st.Port = r.Port
-		key := ruleKey(r)
-		if prev, ok := injectSeen[key]; ok {
-			return fmt.Errorf("duplicate inject hosts %q and %q", prev, st.Host)
+		if err := claimPolicyRule(claims, r, st.Host, "inject"); err != nil {
+			return err
 		}
-		injectSeen[key] = st.Host
-		if prev, ok := allowSeen[key]; ok {
-			return fmt.Errorf("host %q appears in both allow and inject (%q)", st.Host, prev)
+		if err := validateInjectStanza(st, r); err != nil {
+			return err
 		}
+		if st.DummyEnv != "" {
+			if previous, ok := dummyValues[st.DummyEnv]; ok && previous != st.DummyValue {
+				return fmt.Errorf("dummy_env %q has conflicting dummy values", st.DummyEnv)
+			}
+			dummyValues[st.DummyEnv] = st.DummyValue
+		}
+	}
+	for i := range c.SigV4 {
+		st := &c.SigV4[i]
+		r, err := ParseRule(st.Host)
+		if err != nil {
+			return fmt.Errorf("sigv4 host %q: %w", st.Host, err)
+		}
+		st.Port = r.Port
+		if err := claimPolicyRule(claims, r, st.Host, "sigv4"); err != nil {
+			return err
+		}
+		if err := validateSigV4Stanza(st, r); err != nil {
+			return err
+		}
+	}
+	for i := range c.MTLS {
+		st := &c.MTLS[i]
+		r, err := ParseRule(st.Host)
+		if err != nil {
+			return fmt.Errorf("mtls host %q: %w", st.Host, err)
+		}
+		st.Port = r.Port
+		if err := claimPolicyRule(claims, r, st.Host, "mtls"); err != nil {
+			return err
+		}
+		if err := validateMTLSStanza(st, r); err != nil {
+			return err
+		}
+	}
+	if err := validateCredentialEnvPassthrough(c.Options.EnvPassthrough, len(c.SigV4) > 0, hasGitHubBasic(c.Inject)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func hasGitHubBasic(inject []InjectStanza) bool {
+	for _, st := range inject {
+		if st.Transform == "github-basic" {
+			return true
+		}
+	}
+	return false
+}
+
+func validateCredentialEnvPassthrough(entries []string, sigV4, githubBasic bool) error {
+	if sigV4 {
+		for _, pattern := range entries {
+			for _, name := range []string{"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"} {
+				if envPassthroughMatches(pattern, name) {
+					return fmt.Errorf("env_passthrough %q conflicts with SigV4 dummy credential %s", pattern, name)
+				}
+			}
+		}
+	}
+	if githubBasic {
+		for _, pattern := range entries {
+			if envPassthroughMatches(pattern, "GIT_CONFIG_COUNT") ||
+				envPassthroughMatchesPrefix(pattern, "GIT_CONFIG_KEY_") ||
+				envPassthroughMatchesPrefix(pattern, "GIT_CONFIG_VALUE_") ||
+				envPassthroughMatches(pattern, "GIT_ASKPASS") ||
+				envPassthroughMatches(pattern, "GIT_TERMINAL_PROMPT") {
+				return fmt.Errorf("env_passthrough %q conflicts with github-basic command settings", pattern)
+			}
+		}
+	}
+	return nil
+}
+
+func envPassthroughMatches(pattern, name string) bool {
+	if strings.HasSuffix(pattern, "*") {
+		return strings.HasPrefix(name, strings.TrimSuffix(pattern, "*"))
+	}
+	return pattern == name
+}
+
+// envPassthroughMatchesPrefix reports whether a permitted exact/trailing-star
+// pattern could pass any setting under prefix.
+func envPassthroughMatchesPrefix(pattern, prefix string) bool {
+	if strings.HasSuffix(pattern, "*") {
+		pattern = strings.TrimSuffix(pattern, "*")
+		return strings.HasPrefix(prefix, pattern) || strings.HasPrefix(pattern, prefix)
+	}
+	return strings.HasPrefix(pattern, prefix)
+}
+
+func claimPolicyRule(claims map[string]string, r AllowRule, host, kind string) error {
+	key := ruleKey(r)
+	if previous, ok := claims[key]; ok {
+		return fmt.Errorf("host %q appears in both %s and %s", host, previous, kind)
+	}
+	claims[key] = kind
+	return nil
+}
+
+func validateInjectStanza(st *InjectStanza, r AllowRule) error {
+	if st.Transform == "" {
+		st.Transform = "template"
+	}
+	if st.DummyValue == "" {
+		st.DummyValue = "cove-dummy-do-not-use"
+	}
+	if st.ALPN == "" {
+		st.ALPN = "h2"
+	}
+	if st.ALPN != "h2" && st.ALPN != "http/1.1" {
+		return fmt.Errorf("inject %q alpn must be h2 or http/1.1", st.Host)
+	}
+	if st.Mode != "" && st.Mode != "oauth-refresh" {
+		return fmt.Errorf("inject %q mode %q not implemented in v0", st.Host, st.Mode)
+	}
+	if st.Secret == "" {
+		return fmt.Errorf("inject %q missing secret", st.Host)
+	}
+	if !validSecretRef(st.Secret) {
+		return fmt.Errorf("inject %q has unsupported secret ref %q", st.Host, st.Secret)
+	}
+	switch st.Transform {
+	case "template":
 		if st.HeaderName == "" {
 			return fmt.Errorf("inject %q missing header_name", st.Host)
 		}
 		if !strings.Contains(st.HeaderTemplate, "{secret}") {
 			return fmt.Errorf("inject %q header_template must contain {secret}", st.Host)
 		}
-		if st.Secret == "" {
-			return fmt.Errorf("inject %q missing secret", st.Host)
+	case "github-basic":
+		if r.Wildcard || r.Host != "github.com" {
+			return fmt.Errorf("inject %q github-basic requires exact github.com host", st.Host)
 		}
-		if !validSecretRef(st.Secret) {
-			return fmt.Errorf("inject %q has unsupported secret ref %q", st.Host, st.Secret)
+		if !strings.EqualFold(st.HeaderName, "Authorization") {
+			return fmt.Errorf("inject %q github-basic requires Authorization header_name", st.Host)
 		}
-		if st.DummyValue == "" {
-			st.DummyValue = "cove-dummy-do-not-use"
+		if st.BasicUsername != "x-access-token" {
+			return fmt.Errorf("inject %q github-basic requires basic_username x-access-token", st.Host)
 		}
-		if st.ALPN == "" {
-			st.ALPN = "h2"
+		if st.HeaderTemplate != "" {
+			return fmt.Errorf("inject %q github-basic does not permit header_template", st.Host)
 		}
-		if st.ALPN != "h2" && st.ALPN != "http/1.1" {
-			return fmt.Errorf("inject %q alpn must be h2 or http/1.1", st.Host)
+		if len(st.GitHubRepositories) == 0 {
+			return fmt.Errorf("inject %q github-basic requires github_repositories", st.Host)
 		}
-		if st.Mode != "" && st.Mode != "oauth-refresh" {
-			return fmt.Errorf("inject %q mode %q not implemented in v0", st.Host, st.Mode)
+		seen := map[string]bool{}
+		for _, repo := range st.GitHubRepositories {
+			if err := validateGitHubRepository(repo); err != nil {
+				return fmt.Errorf("inject %q github repository %q: %w", st.Host, repo, err)
+			}
+			key := strings.ToLower(repo)
+			if seen[key] {
+				return fmt.Errorf("inject %q duplicate github repository %q", st.Host, repo)
+			}
+			seen[key] = true
+		}
+		if len(st.AllowedMethods) == 0 {
+			return fmt.Errorf("inject %q github-basic requires allowed_methods", st.Host)
+		}
+		for _, method := range st.AllowedMethods {
+			if method != "GET" && method != "POST" {
+				return fmt.Errorf("inject %q github-basic method %q is not allowed", st.Host, method)
+			}
+		}
+	default:
+		return fmt.Errorf("inject %q transform %q is not supported", st.Host, st.Transform)
+	}
+	return validateCredentialMetadata("inject", st.Host, st.Issuer, st.MaxTTL, st.BootstrapRef)
+}
+
+func validateGitHubRepository(repo string) error {
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || repo == "*/*" {
+		return errors.New("must be owner/repo or owner/*")
+	}
+	for i, p := range parts {
+		if i == 1 && p == "*" {
+			continue
+		}
+		if p == "." || p == ".." || strings.ContainsAny(p, "%\\") || !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`).MatchString(p) {
+			return errors.New("has invalid component")
+		}
+	}
+	return nil
+}
+
+var regionPattern = regexp.MustCompile(`^[a-z0-9-]+$`)
+var accountIDPattern = regexp.MustCompile(`^[0-9]{12}$`)
+var s3BucketPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*[a-z0-9]$`)
+
+func validateSigV4Stanza(st *SigV4Stanza, r AllowRule) error {
+	endpointRegion, bucket, err := parseS3EndpointRule(r)
+	if err != nil {
+		return fmt.Errorf("sigv4 %q: %w", st.Host, err)
+	}
+	if st.Service != "s3" {
+		return fmt.Errorf("sigv4 %q service must be s3", st.Host)
+	}
+	if !regionPattern.MatchString(st.Region) || st.Region != endpointRegion {
+		return fmt.Errorf("sigv4 %q region must match S3 endpoint region", st.Host)
+	}
+	if !accountIDPattern.MatchString(st.AccountID) {
+		return fmt.Errorf("sigv4 %q account_id must be a 12-digit value", st.Host)
+	}
+	if st.AccessKeyID == "" || !validSecretRef(st.AccessKeyID) {
+		return fmt.Errorf("sigv4 %q missing or invalid access_key_id", st.Host)
+	}
+	if st.SecretAccessKey == "" || !validSecretRef(st.SecretAccessKey) {
+		return fmt.Errorf("sigv4 %q missing or invalid secret_access_key", st.Host)
+	}
+	if st.SessionToken != "" && !validSecretRef(st.SessionToken) {
+		return fmt.Errorf("sigv4 %q has unsupported session_token ref %q", st.Host, st.SessionToken)
+	}
+	if len(st.AllowedMethods) == 0 || len(st.AllowedOperations) == 0 || len(st.AllowedResources) == 0 {
+		return fmt.Errorf("sigv4 %q requires methods, operations, and resources", st.Host)
+	}
+	if st.MaxBodyBytes < 1 || st.MaxBodyBytes > 1<<30 {
+		return fmt.Errorf("sigv4 %q max_body_bytes must be between 1 and 1073741824", st.Host)
+	}
+	if st.ALPN == "" {
+		st.ALPN = "h2"
+	}
+	if st.ALPN != "h2" && st.ALPN != "http/1.1" {
+		return fmt.Errorf("sigv4 %q alpn must be h2 or http/1.1", st.Host)
+	}
+	methodSet := map[string]bool{}
+	for _, m := range st.AllowedMethods {
+		if m != strings.ToUpper(m) || !sigV4MethodAllowed(m) {
+			return fmt.Errorf("sigv4 %q method %q is not supported", st.Host, m)
+		}
+		methodSet[m] = true
+	}
+	operationSet := map[string]bool{}
+	for _, op := range st.AllowedOperations {
+		if !sigV4OperationAllowed(op) {
+			return fmt.Errorf("sigv4 %q operation %q is not supported", st.Host, op)
+		}
+		operationSet[op] = true
+	}
+	for op := range operationSet {
+		if !operationHasMethod(op, methodSet) {
+			return fmt.Errorf("sigv4 %q operation %q has no compatible method", st.Host, op)
+		}
+	}
+	for _, resource := range st.AllowedResources {
+		resourceBucket, err := validateS3ResourcePattern(resource)
+		if err != nil {
+			return fmt.Errorf("sigv4 %q resource %q: %w", st.Host, resource, err)
+		}
+		if bucket != "" && resourceBucket != bucket {
+			return fmt.Errorf("sigv4 %q resource %q does not cover virtual-host bucket %q", st.Host, resource, bucket)
+		}
+	}
+	return validateCredentialMetadata("sigv4", st.Host, st.Issuer, st.MaxTTL, st.BootstrapRef)
+}
+
+// parseS3EndpointRule accepts only the endpoint forms whose region and resource
+// interpretation are unambiguous in v1.
+func parseS3EndpointRule(r AllowRule) (region, bucket string, err error) {
+	host := r.Host
+	if excludedS3EndpointRule(host) {
+		return "", "", errors.New("unsupported S3 endpoint form")
+	}
+	if r.Wildcard {
+		parts := strings.Split(host, ".")
+		if len(parts) == 4 && parts[0] == "s3" && parts[2] == "amazonaws" && parts[3] == "com" && supportedS3EndpointRegion(parts[1]) {
+			return parts[1], "", nil
+		}
+		return "", "", errors.New("wildcard is only permitted for *.s3.<region>.amazonaws.com")
+	}
+	if host == "s3.amazonaws.com" {
+		return "us-east-1", "", nil
+	}
+	parts := strings.Split(host, ".")
+	if len(parts) == 4 && parts[0] == "s3" && parts[2] == "amazonaws" && parts[3] == "com" && supportedS3EndpointRegion(parts[1]) {
+		return parts[1], "", nil
+	}
+	if len(parts) == 5 && parts[1] == "s3" && parts[3] == "amazonaws" && parts[4] == "com" && s3BucketPattern.MatchString(parts[0]) && supportedS3EndpointRegion(parts[2]) {
+		return parts[2], parts[0], nil
+	}
+	return "", "", errors.New("unsupported S3 endpoint form")
+}
+
+func supportedS3EndpointRegion(region string) bool {
+	if !regionPattern.MatchString(region) {
+		return false
+	}
+	for _, prefix := range []string{"us-gov-", "cn-", "us-iso-", "us-isob-", "us-isof-", "eu-isoe-"} {
+		if strings.HasPrefix(region, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+func excludedS3EndpointRule(host string) bool {
+	if strings.HasSuffix(host, ".amazonaws.com.cn") {
+		return true
+	}
+	for _, marker := range []string{
+		"s3-accelerate", "s3.dualstack.", ".s3.dualstack.", "s3-fips", "s3-accesspoint",
+		"s3-outposts", "s3-control", ".mrap.", ".accesspoint.s3-global.",
+	} {
+		if strings.Contains(host, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateS3ResourcePattern(resource string) (string, error) {
+	const prefix = "arn:aws:s3:::"
+	if !strings.HasPrefix(resource, prefix) {
+		return "", errors.New("must be an arn:aws:s3::: resource")
+	}
+	rest := strings.TrimPrefix(resource, prefix)
+	parts := strings.SplitN(rest, "/", 2)
+	bucket := parts[0]
+	if !s3BucketPattern.MatchString(bucket) || bucket == "*" {
+		return "", errors.New("has invalid bucket")
+	}
+	if len(parts) == 2 {
+		key := parts[1]
+		if key == "" || strings.Contains(key, "\\") || strings.Contains(strings.ToLower(key), "%2f") || strings.Contains(strings.ToLower(key), "%5c") {
+			return "", errors.New("has invalid key pattern")
+		}
+		for _, seg := range strings.Split(key, "/") {
+			if seg == "." || seg == ".." {
+				return "", errors.New("has traversal")
+			}
+		}
+		if strings.Count(key, "*") > 1 || (strings.Contains(key, "*") && !strings.HasSuffix(key, "*")) {
+			return "", errors.New("permits only one trailing wildcard")
+		}
+	}
+	return bucket, nil
+}
+
+func sigV4MethodAllowed(method string) bool {
+	return method == "GET" || method == "HEAD" || method == "PUT" || method == "DELETE"
+}
+func sigV4OperationAllowed(op string) bool {
+	switch op {
+	case "s3:GetObject", "s3:HeadObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:CopyObject":
+		return true
+	}
+	return false
+}
+func operationHasMethod(op string, methods map[string]bool) bool {
+	switch op {
+	case "s3:GetObject", "s3:ListBucket":
+		return methods["GET"]
+	case "s3:HeadObject":
+		return methods["HEAD"]
+	case "s3:PutObject", "s3:CopyObject":
+		return methods["PUT"]
+	case "s3:DeleteObject":
+		return methods["DELETE"]
+	}
+	return false
+}
+
+func validateMTLSStanza(st *MTLSStanza, r AllowRule) error {
+	if r.Wildcard {
+		return fmt.Errorf("mtls %q does not permit wildcard hosts", st.Host)
+	}
+	if st.ClientCert == "" || !validSecretRef(st.ClientCert) {
+		return fmt.Errorf("mtls %q missing or invalid client_cert", st.Host)
+	}
+	if st.ClientKey == "" || !validSecretRef(st.ClientKey) {
+		return fmt.Errorf("mtls %q missing or invalid client_key", st.Host)
+	}
+	if len(st.AllowedMethods) == 0 || len(st.AllowedPrefixes) == 0 {
+		return fmt.Errorf("mtls %q requires allowed_methods and allowed_path_prefixes", st.Host)
+	}
+	for _, m := range st.AllowedMethods {
+		if m == "" || m != strings.ToUpper(m) {
+			return fmt.Errorf("mtls %q method %q must be uppercase", st.Host, m)
+		}
+	}
+	for _, prefix := range st.AllowedPrefixes {
+		if err := validateHTTPPathPrefix(prefix); err != nil {
+			return fmt.Errorf("mtls %q path prefix %q: %w", st.Host, prefix, err)
+		}
+	}
+	if st.ALPN == "" {
+		st.ALPN = "h2"
+	}
+	if st.ALPN != "h2" && st.ALPN != "http/1.1" {
+		return fmt.Errorf("mtls %q alpn must be h2 or http/1.1", st.Host)
+	}
+	return validateCredentialMetadata("mtls", st.Host, st.Issuer, st.MaxTTL, st.BootstrapRef)
+}
+
+func validateHTTPPathPrefix(prefix string) error {
+	if prefix == "" || !strings.HasPrefix(prefix, "/") || strings.ContainsAny(prefix, "?#\\") {
+		return errors.New("must be an absolute path without query or fragment")
+	}
+	lower := strings.ToLower(prefix)
+	if strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
+		return errors.New("contains encoded separator")
+	}
+	trimmed := strings.TrimSuffix(prefix, "/")
+	for _, segment := range strings.Split(trimmed, "/") {
+		if segment == "." || segment == ".." {
+			return errors.New("contains traversal")
+		}
+	}
+	if strings.Contains(prefix, "//") {
+		return errors.New("must be clean")
+	}
+	return nil
+}
+
+func validateCredentialMetadata(kind, host, issuer, maxTTL, bootstrapRef string) error {
+	if maxTTL != "" {
+		if d, err := time.ParseDuration(maxTTL); err != nil || d <= 0 {
+			return fmt.Errorf("%s %q max_ttl must be a positive duration", kind, host)
+		}
+	}
+	if (issuer == "") != (bootstrapRef == "") {
+		return fmt.Errorf("%s %q issuer and bootstrap_ref must be set together", kind, host)
+	}
+	if bootstrapRef != "" {
+		if strings.HasPrefix(bootstrapRef, "file:") || strings.HasPrefix(bootstrapRef, "env:") || strings.HasPrefix(bootstrapRef, "json:") || strings.ContainsAny(bootstrapRef, " \t\r\n") {
+			return fmt.Errorf("%s %q has invalid bootstrap_ref", kind, host)
 		}
 	}
 	return nil

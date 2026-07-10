@@ -10,7 +10,22 @@ import (
 type compiledRule struct {
 	rule   config.AllowRule
 	policy Policy
-	inject *config.InjectStanza
+	inject *InjectPolicy
+}
+
+type InjectKind uint8
+
+const (
+	InjectHeader InjectKind = iota
+	InjectSigV4
+	InjectMTLS
+)
+
+type InjectPolicy struct {
+	Kind   InjectKind
+	Header *config.InjectStanza
+	SigV4  *config.SigV4Stanza
+	MTLS   *config.MTLSStanza
 }
 
 func NewMatcher(cfg *config.Config) *Matcher {
@@ -23,12 +38,26 @@ func NewMatcher(cfg *config.Config) *Matcher {
 		if err != nil {
 			continue
 		}
-		m.rules = append(m.rules, compiledRule{rule: r, policy: PolicyInject, inject: &cfg.Inject[i]})
+		m.rules = append(m.rules, compiledRule{rule: r, policy: PolicyInject, inject: &InjectPolicy{Kind: InjectHeader, Header: &cfg.Inject[i]}})
+	}
+	for i := range cfg.SigV4 {
+		r, err := config.ParseRule(cfg.SigV4[i].Host)
+		if err != nil {
+			continue
+		}
+		m.rules = append(m.rules, compiledRule{rule: r, policy: PolicyInject, inject: &InjectPolicy{Kind: InjectSigV4, SigV4: &cfg.SigV4[i]}})
+	}
+	for i := range cfg.MTLS {
+		r, err := config.ParseRule(cfg.MTLS[i].Host)
+		if err != nil {
+			continue
+		}
+		m.rules = append(m.rules, compiledRule{rule: r, policy: PolicyInject, inject: &InjectPolicy{Kind: InjectMTLS, MTLS: &cfg.MTLS[i]}})
 	}
 	return m
 }
 
-func (m *Matcher) Match(host string, port int) (Policy, *config.InjectStanza) {
+func (m *Matcher) Match(host string, port int) (Policy, *InjectPolicy) {
 	host = strings.Trim(strings.ToLower(host), "[]")
 	ip := net.ParseIP(host)
 	var exact *compiledRule
@@ -40,14 +69,14 @@ func (m *Matcher) Match(host string, port int) (Policy, *config.InjectStanza) {
 		}
 		if r.rule.Wildcard {
 			if ip == nil && wildcardMatch(host, r.rule.Host) {
-				if wild == nil || r.policy == PolicyInject {
+				if wild == nil {
 					wild = r
 				}
 			}
 			continue
 		}
 		if host == r.rule.Host {
-			if exact == nil || r.policy == PolicyInject {
+			if exact == nil {
 				exact = r
 			}
 		}

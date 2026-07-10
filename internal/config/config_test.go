@@ -1,7 +1,9 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -12,6 +14,29 @@ func TestSeedValidates(t *testing.T) {
 	}
 	if len(cfg.AllowRules) == 0 {
 		t.Fatalf("seed allow rules were not compiled")
+	}
+}
+
+func TestShippedDefaultConfigAndGitHubPATMigrationValidate(t *testing.T) {
+	seed, err := os.ReadFile("default_config.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadBytes(seed); err != nil {
+		t.Fatalf("shipped default_config.toml did not validate: %v", err)
+	}
+
+	// The documented migration removes the OAuth allow rules and uncommenting
+	// both examples creates the exact GitHub API + smart-HTTP policy pair.
+	migrated := string(seed)
+	migrated = strings.Replace(migrated, `  "github.com", "api.github.com", "codeload.github.com", "*.githubusercontent.com",`, `  "codeload.github.com", "*.githubusercontent.com",`, 1)
+	for _, line := range []string{
+		"# [[inject]]", "# host =", "# header_name =", "# header_template =", "# secret =", "# dummy_env =", "# transform =", "# basic_username =", "# github_repositories =", "# allowed_methods =",
+	} {
+		migrated = strings.ReplaceAll(migrated, line, strings.TrimPrefix(line, "# "))
+	}
+	if _, err := LoadBytes([]byte(migrated)); err != nil {
+		t.Fatalf("GitHub PAT migration did not validate: %v", err)
 	}
 }
 
@@ -177,4 +202,199 @@ secret = "file:/definitely/missing/cove/test/secret"
 	if len(cfg.Inject) != 1 {
 		t.Fatalf("inject len = %d, want 1", len(cfg.Inject))
 	}
+}
+
+func TestPolicyClaimsAreExclusiveAcrossKinds(t *testing.T) {
+	host := "s3.us-east-1.amazonaws.com"
+	stanzas := map[string]string{
+		"allow": `allow = ["` + host + `"]`,
+		"inject": `[[inject]]
+host="` + host + `"
+header_name="Authorization"
+header_template="Bearer {secret}"
+secret="env:TOKEN"`,
+		"sigv4": validSigV4(host),
+		"mtls":  validMTLS(host),
+	}
+	for left, leftConfig := range stanzas {
+		for right, rightConfig := range stanzas {
+			if left >= right {
+				continue
+			}
+			t.Run(left+"/"+right, func(t *testing.T) {
+				if _, err := LoadBytes([]byte(leftConfig + "\n" + rightConfig)); err == nil || !strings.Contains(err.Error(), "appears in both") {
+					t.Fatalf("same host %s/%s should conflict, got %v", left, right, err)
+				}
+			})
+		}
+	}
+}
+
+func TestSpecializedStanzasDecode(t *testing.T) {
+	cfg, err := LoadBytes([]byte(validSigV4("my-bucket.s3.us-east-1.amazonaws.com") + "\n" + validMTLS("partner.example.com")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.SigV4) != 1 || len(cfg.MTLS) != 1 {
+		t.Fatalf("specialized TOML stanzas were dropped: %+v", cfg)
+	}
+}
+
+func TestSigV4EndpointAndResourceValidation(t *testing.T) {
+	validHosts := []string{"s3.amazonaws.com", "s3.us-east-1.amazonaws.com", "my-bucket.s3.us-east-1.amazonaws.com", "*.s3.us-east-1.amazonaws.com"}
+	for _, host := range validHosts {
+		t.Run("accept/"+host, func(t *testing.T) {
+			if _, err := LoadBytes([]byte(validSigV4(host))); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	invalidHosts := []struct{ host, region string }{
+		{"s3-accelerate.amazonaws.com", "us-east-1"},
+		{"s3.dualstack.us-east-1.amazonaws.com", "us-east-1"},
+		{"bucket.s3.dualstack.us-east-1.amazonaws.com", "us-east-1"},
+		{"s3-fips.us-east-1.amazonaws.com", "us-east-1"},
+		{"bucket.s3-accesspoint.us-east-1.amazonaws.com", "us-east-1"},
+		{"bucket.s3-outposts.us-east-1.amazonaws.com", "us-east-1"},
+		{"name.mrap.accesspoint.s3-global.amazonaws.com", "us-east-1"},
+		{"s3-control.us-east-1.amazonaws.com", "us-east-1"},
+		{"s3.cn-north-1.amazonaws.com.cn", "cn-north-1"},
+		{"s3.cn-north-1.amazonaws.com", "cn-north-1"},
+		{"s3.us-gov-west-1.amazonaws.com", "us-gov-west-1"},
+		{"s3.us-iso-east-1.amazonaws.com", "us-iso-east-1"},
+		{"s3.us-isob-east-1.amazonaws.com", "us-isob-east-1"},
+		{"s3.example.com", "us-east-1"},
+		{"*.amazonaws.com", "us-east-1"},
+	}
+	for _, tt := range invalidHosts {
+		t.Run("reject/"+tt.host, func(t *testing.T) {
+			body := strings.Replace(validSigV4(tt.host), `region="us-east-1"`, `region="`+tt.region+`"`, 1)
+			if _, err := LoadBytes([]byte(body)); err == nil {
+				t.Fatal("expected endpoint rejection")
+			}
+		})
+	}
+	for _, resource := range []string{"arn:aws:s3:::my-bucket/*", "arn:aws:s3:::my-bucket/a/b", "arn:aws:s3:::my-bucket"} {
+		t.Run("resource/"+resource, func(t *testing.T) {
+			body := strings.Replace(validSigV4("my-bucket.s3.us-east-1.amazonaws.com"), "arn:aws:s3:::my-bucket/*", resource, 1)
+			if _, err := LoadBytes([]byte(body)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	for _, resource := range []string{"arn:aws:s3:::*", "arn:aws:s3:::my-bucket/a*no", "arn:aws:s3:::my-bucket/../x", "arn:aws:s3:::my-bucket/%2f"} {
+		t.Run("bad-resource/"+resource, func(t *testing.T) {
+			body := strings.Replace(validSigV4("my-bucket.s3.us-east-1.amazonaws.com"), "arn:aws:s3:::my-bucket/*", resource, 1)
+			if _, err := LoadBytes([]byte(body)); err == nil {
+				t.Fatal("expected resource rejection")
+			}
+		})
+	}
+}
+
+func TestGitHubBasicValidation(t *testing.T) {
+	valid := validGitHubBasic()
+	if _, err := LoadBytes([]byte(valid)); err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string][2]string{
+		"wrong host": {"github.com", "api.github.com"}, "wildcard": {"github.com", "*.github.com"},
+		"username": {"x-access-token", "octocat"}, "template": {`header_template=""`, `header_template="Bearer {secret}"`},
+		"empty repos":     {`github_repositories=["Acme/repo", "Acme/*"]`, `github_repositories=[]`},
+		"global wildcard": {"Acme/repo", "*/*"}, "case duplicate": {`["Acme/repo", "Acme/*"]`, `["Acme/repo", "acme/REPO"]`},
+		"method": {`["GET", "POST"]`, `["GET", "DELETE"]`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadBytes([]byte(strings.Replace(valid, change[0], change[1], 1))); err == nil {
+				t.Fatal("expected github-basic rejection")
+			}
+		})
+	}
+}
+
+func TestCredentialPassthroughConflictsAreRejected(t *testing.T) {
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "real-host-secret-must-not-cross")
+	for name, body := range map[string]string{
+		"sigv4 access key":       `[options]` + "\n" + `env_passthrough=["AWS_ACCESS_KEY_ID"]` + "\n" + validSigV4("my-bucket.s3.us-east-1.amazonaws.com"),
+		"sigv4 secret key":       `[options]` + "\n" + `env_passthrough=["AWS_SECRET_ACCESS_KEY"]` + "\n" + validSigV4("my-bucket.s3.us-east-1.amazonaws.com"),
+		"sigv4 session token":    `[options]` + "\n" + `env_passthrough=["AWS_SESSION_TOKEN"]` + "\n" + validSigV4("my-bucket.s3.us-east-1.amazonaws.com"),
+		"sigv4 wildcard":         `[options]` + "\n" + `env_passthrough=["AWS_*"]` + "\n" + validSigV4("my-bucket.s3.us-east-1.amazonaws.com"),
+		"github config count":    `[options]` + "\n" + `env_passthrough=["GIT_CONFIG_COUNT"]` + "\n" + validGitHubBasic(),
+		"github config key":      `[options]` + "\n" + `env_passthrough=["GIT_CONFIG_KEY_0"]` + "\n" + validGitHubBasic(),
+		"github config value":    `[options]` + "\n" + `env_passthrough=["GIT_CONFIG_VALUE_0"]` + "\n" + validGitHubBasic(),
+		"github askpass":         `[options]` + "\n" + `env_passthrough=["GIT_ASKPASS"]` + "\n" + validGitHubBasic(),
+		"github terminal prompt": `[options]` + "\n" + `env_passthrough=["GIT_TERMINAL_PROMPT"]` + "\n" + validGitHubBasic(),
+		"github wildcard":        `[options]` + "\n" + `env_passthrough=["GIT_CONFIG_*"]` + "\n" + validGitHubBasic(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadBytes([]byte(body)); err == nil {
+				t.Fatal("expected credential passthrough conflict")
+			}
+		})
+	}
+}
+
+func TestMTLSValidation(t *testing.T) {
+	valid := validMTLS("partner.example.com")
+	if _, err := LoadBytes([]byte(valid)); err != nil {
+		t.Fatal(err)
+	}
+	for name, change := range map[string][2]string{
+		"wildcard": {"partner.example.com", "*.example.com"}, "lower method": {`["GET", "POST"]`, `["get"]`},
+		"empty prefixes": {`["/v1/limited/"]`, `[]`}, "relative prefix": {`"/v1/limited/"`, `"v1"`},
+		"encoded separator": {`"/v1/limited/"`, `"/v1%2fprivate"`}, "traversal": {`"/v1/limited/"`, `"/v1/../private"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadBytes([]byte(strings.Replace(valid, change[0], change[1], 1))); err == nil {
+				t.Fatal("expected mTLS rejection")
+			}
+		})
+	}
+}
+
+func TestCredentialMetadataValidation(t *testing.T) {
+	valid := validMTLS("partner.example.com") + "\nissuer=\"https://issuer.example\"\nbootstrap_ref=\"vault:bootstrap\"\nmax_ttl=\"1h\""
+	if _, err := LoadBytes([]byte(valid)); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range [][2]string{{`max_ttl="1h"`, `max_ttl="0s"`}, {`bootstrap_ref="vault:bootstrap"`, `bootstrap_ref="file:/secret"`}, {`issuer="https://issuer.example"`, ``}} {
+		if _, err := LoadBytes([]byte(strings.Replace(valid, change[0], change[1], 1))); err == nil {
+			t.Fatal("expected metadata rejection")
+		}
+	}
+}
+
+func validSigV4(host string) string {
+	return `[[sigv4]]
+host="` + host + `"
+access_key_id="env:ACCESS"
+secret_access_key="env:SECRET"
+account_id="123456789012"
+service="s3"
+region="us-east-1"
+allowed_methods=["GET", "HEAD", "PUT"]
+allowed_operations=["s3:GetObject", "s3:HeadObject", "s3:PutObject"]
+allowed_resources=["arn:aws:s3:::my-bucket/*"]
+max_body_bytes=1`
+}
+
+func validMTLS(host string) string {
+	return `[[mtls]]
+host="` + host + `"
+client_cert="env:CERT"
+client_key="env:KEY"
+allowed_methods=["GET", "POST"]
+allowed_path_prefixes=["/v1/limited/"]`
+}
+
+func validGitHubBasic() string {
+	return `[[inject]]
+host="github.com"
+transform="github-basic"
+header_name="Authorization"
+header_template=""
+basic_username="x-access-token"
+secret="env:TOKEN"
+github_repositories=["Acme/repo", "Acme/*"]
+allowed_methods=["GET", "POST"]`
 }

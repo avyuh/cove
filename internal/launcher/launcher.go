@@ -46,6 +46,13 @@ var (
 	probeUsernsSelf = setup.ProbeUsernsSelf
 )
 
+var sigV4DummyEnv = map[string]string{
+	"AWS_ACCESS_KEY_ID":         "COVE0000000000000000",
+	"AWS_SECRET_ACCESS_KEY":     "cove-dummy-secret-access-key-do-not-use",
+	"AWS_SESSION_TOKEN":         "cove-dummy-session-token-do-not-use",
+	"AWS_EC2_METADATA_DISABLED": "true",
+}
+
 func (e ExitError) Error() string {
 	return e.Msg
 }
@@ -53,6 +60,9 @@ func (e ExitError) Error() string {
 func Run(cfg *config.Config, opts Opts) (int, error) {
 	if opts.DryRun {
 		fmt.Printf("project=%s proxy_port=%d agent=%q\n", opts.Project, cfg.Options.ProxyPort, opts.AgentArgv)
+		for _, line := range setup.CredentialPostureLines(cfg) {
+			fmt.Println(line)
+		}
 		return 0, nil
 	}
 	project, err := resolveProject(opts.Project)
@@ -109,6 +119,7 @@ func buildDirectives(cfg *config.Config, opts Opts, project, proxySock string) (
 	bundle = append(append([]byte{}, bundle...), '\n')
 	bundle = append(bundle, ca...)
 	inject := make([]box.InjectDirective, 0, len(cfg.Inject))
+	dummyEnv := make(map[string]string)
 	for _, st := range cfg.Inject {
 		host := st.Host
 		port := st.Port
@@ -119,11 +130,31 @@ func buildDirectives(cfg *config.Config, opts Opts, project, proxySock string) (
 		inject = append(inject, box.InjectDirective{
 			Host:         host,
 			Port:         port,
+			Transform:    st.Transform,
 			DummyEnv:     st.DummyEnv,
 			DummyValue:   st.DummyValue,
 			BaseURLEnv:   st.BaseURLEnv,
 			BaseURLValue: st.BaseURLValue,
 		})
+		if st.DummyEnv != "" {
+			dummyEnv[st.DummyEnv] = st.DummyValue
+		}
+	}
+	if len(cfg.SigV4) > 0 {
+		for key, value := range sigV4DummyEnv {
+			dummyEnv[key] = value
+		}
+		region := cfg.SigV4[0].Region
+		for _, st := range cfg.SigV4[1:] {
+			if st.Region != region {
+				region = ""
+				break
+			}
+		}
+		if region != "" {
+			dummyEnv["AWS_REGION"] = region
+			dummyEnv["AWS_DEFAULT_REGION"] = region
+		}
 	}
 	env := map[string]string{}
 	for _, pattern := range cfg.Options.EnvPassthrough {
@@ -160,6 +191,7 @@ func buildDirectives(cfg *config.Config, opts Opts, project, proxySock string) (
 		CAPEM:          ca,
 		CABundlePEM:    bundle,
 		Inject:         inject,
+		DummyEnv:       dummyEnv,
 		CredMount:      creds,
 		RuntimeMount:   runtimeMounts,
 		EnvPassthrough: env,

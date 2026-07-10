@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,23 +71,49 @@ func (c *Conn) handle() {
 			break
 		}
 	}
-	policy, stanza := c.matcher.Match(t.Host, t.Port)
+	policy, inject := c.matcher.Match(t.Host, t.Port)
 	if policy == PolicyDeny {
 		c.deny(t, 403, "denied by cove policy\n")
 		return
 	}
 	if policy == PolicyInject {
-		if stanza == nil {
+		if inject == nil {
 			c.deny(t, 502, "inject policy unavailable\n")
 			return
 		}
-		if err := c.serveInject(c.raw, c.br, t, stanza); err != nil && !isClosed(err) {
+		if err := c.serveInjectPolicy(c.raw, c.br, t, inject); err != nil && !isClosed(err) {
 			fmt.Fprintf(c.proxy.log, "cove proxyd: inject %s:%d: %v\n", t.Host, t.Port, err)
 		}
 		return
 	}
 	if err := c.tunnel(t, policy); err != nil {
 		fmt.Fprintf(c.proxy.log, "cove proxyd: tunnel %s:%d: %v\n", t.Host, t.Port, err)
+	}
+}
+
+func (c *Conn) serveInjectPolicy(raw net.Conn, br *bufio.Reader, t Target, policy *InjectPolicy) error {
+	switch policy.Kind {
+	case InjectHeader:
+		if policy.Header == nil {
+			c.deny(t, http.StatusBadGateway, "inject policy unavailable\n")
+			return nil
+		}
+		return c.serveInject(raw, br, t, policy.Header)
+	case InjectSigV4:
+		if policy.SigV4 == nil {
+			c.deny(t, http.StatusBadGateway, "inject policy unavailable\n")
+			return nil
+		}
+		return c.serveSigV4(raw, br, t, policy.SigV4)
+	case InjectMTLS:
+		if policy.MTLS == nil {
+			c.deny(t, http.StatusBadGateway, "inject policy unavailable\n")
+			return nil
+		}
+		return c.serveMTLS(raw, br, t, policy.MTLS)
+	default:
+		c.deny(t, http.StatusBadGateway, "inject policy unavailable\n")
+		return nil
 	}
 }
 

@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -166,4 +168,32 @@ func tlsCertForHost(t *testing.T, ca *CA, host string) tls.Certificate {
 		t.Fatal(err)
 	}
 	return *leaf
+}
+
+// clientLeafFor deliberately lives in tests: production CA.LeafFor issues
+// server-auth leaves for the client-facing MITM only.
+func clientLeafFor(t *testing.T, ca *CA, cn string) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+	serial, err := rand.Int(rand.Reader, serialLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der, ca.cert.Raw}, PrivateKey: key}
 }

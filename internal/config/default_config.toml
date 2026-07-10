@@ -29,6 +29,27 @@ allow = [
   "*.hf.co",
 ]
 
+# GitHub defaults to opaque OAuth login above. PAT injection is an opt-in migration:
+# remove BOTH "github.com" and "api.github.com" from allow, then uncomment BOTH
+# stanzas below. They share one host-side PAT file; cove supplies only a dummy in
+# the box. Use a fine-grained, short-lived PAT; keep the host file mode 0600.
+#
+# [[inject]]
+# host = "api.github.com"
+# header_name = "Authorization"
+# header_template = "Bearer {secret}"
+# secret = "file:~/.config/cove/secrets/github-pat"
+# dummy_env = "GH_TOKEN"
+#
+# [[inject]]
+# host = "github.com"
+# transform = "github-basic"
+# header_name = "Authorization"
+# basic_username = "x-access-token"
+# secret = "file:~/.config/cove/secrets/github-pat"
+# github_repositories = ["OWNER/REPOSITORY"]
+# allowed_methods = ["GET", "POST"]
+
 [[inject]]
 host          = "api.anthropic.com"
 header_name   = "Authorization"

@@ -86,14 +86,25 @@ skips audit records for one run.
 | Hetzner | `~/.config/cove/secrets/hcloud-token` | No — injected |
 | Cloudflare | `~/.config/cove/secrets/cloudflare-token` | No — injected |
 | RunPod | `~/.config/cove/secrets/runpod-key` | No — injected |
+| GitHub PAT (opt-in) | Configure the two GitHub PAT inject stanzas and remove `github.com` and `api.github.com` from `allow` | No — Bearer API and scoped Git smart-HTTP Basic credentials are replaced host-side. |
 
-A missing secret file does not break anything: the stanza degrades to a plain
-allowed tunnel (anonymous Hugging Face downloads still work) and cove warns
-once.
+A missing secret for a legacy header-injection stanza is inert: cove strips
+its dummy header and forwards anonymously (so, for example, public Hugging
+Face downloads can still work) and warns once. SigV4 and upstream-mTLS stanzas
+are different: every required secret is host-side and missing material fails
+closed with HTTP 502; cove never falls back to a tunnel or forwards a dummy.
 
-Other OAuth logins follow the Codex pattern: `gh`, gemini's Google login, and
-wrangler already have their hosts in the seed allow list; add a `cred_mount`
-for the session dir (`~/.config/gh`, `~/.gemini`, `~/.wrangler`).
+For GitHub, choose one mode. The default is `gh` OAuth: GitHub hosts remain
+`allow` rules and `gh` needs `cred_mount = ["~/.config/gh"]`, so that session is
+in the box. PAT mode is different: enable the two commented GitHub `[[inject]]`
+stanzas in the seed, remove both `github.com` and `api.github.com` from `allow`,
+and store a fine-grained PAT in the referenced host file. This gives `gh` API
+Bearer requests and scoped Git smart-HTTP Basic requests a dummy in the box.
+See the [supported/rejected S3 matrix](docs/SPEC.md#531-s3-sigv4-supportedrejected-matrix)
+and [short-lived credential guidance](docs/SHORT-LIVED-CREDENTIALS.md) when
+choosing credential lifetime and scope.
+
+> **Capability — GitHub PAT mode:** Bearer requests to `api.github.com` and scoped Git smart-HTTP Basic requests to `github.com` are replaced host-side; the box holds only a dummy. **Residual — credentialed GitHub oracle:** a subverted agent can still perform every GitHub API/repository operation allowed by the PAT and cove repository/method policy. Use a fine-grained/short-lived token; cove prevents token theft, not authorized misuse.
 
 ## Reading the audit trail
 
@@ -127,12 +138,20 @@ half-written trailing lines are skipped.
   refresh its own token but is unsafe under concurrent sessions on the same
   dir.
 - `runtime_mount` — extra toolchain dirs, read-only, same path as on the host.
-- `env_passthrough` — env vars copied into the box, e.g. `AWS_*` for SigV4
-  tools like `aws` and `s5cmd`, which sign requests with the secret and
-  therefore cannot use header injection.
+- `env_passthrough` — env vars copied into the box for opaque `allow` hosts.
+  Do not pass real `AWS_*` credentials when using a `[[sigv4]]` rule: cove
+  supplies dummy AWS credentials and re-signs its supported S3 subset
+  host-side. Unsupported AWS services or SigV4 modes remain `allow` +
+  short-lived credentials in the box.
 
-A host must be in `allow` or `[[inject]]`, never both; cove validates the
-config and rejects conflicts at startup.
+A host must have exactly one policy kind: `allow`, `[[inject]]`, `[[sigv4]]`,
+or `[[mtls]]`; cove validates conflicts at startup.
+
+> **Capability — S3 SigV4 re-signing (v1):** aws/boto3/s5cmd may hold dummy AWS credentials; cove re-signs supported, finite S3 requests with a host-side key after enforcing configured account label, region, service, method, operation, and resource. **Residual — policy-constrained signing oracle:** a subverted agent can perform every operation the cove policy and AWS IAM both allow. The real key stays out of the box, but cove is not misuse-proof. Presigned URLs, SigV4a, multipart, and AWS streaming/chunk signatures fail closed.
+
+> **Capability — upstream mTLS termination:** the box uses ordinary one-way TLS to cove; cove presents a host-side client certificate only to configured upstream hosts and method/path prefixes. The private key never enters the box. **Residual — credentialed mTLS oracle:** a subverted agent can invoke every operation the destination and cove method/path policy permit through that client identity. This is credential theft resistance, not proof of legitimate intent.
+
+> **Capability — short-lived sources:** cove can consume rotated file/json-backed tokens, SigV4 session credentials, and client certificates issued by an external or human-rooted system. **Residual — blast-radius reduction, not local secret elimination:** expiry limits damage; security still depends on the issuer bootstrap, host authority, snapshots, clock, scope, and renewal path. On a clonable VPS, a local OIDC issuer merely moves the bootstrap secret.
 
 ## What cove stops, and what it does not
 

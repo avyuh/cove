@@ -902,18 +902,23 @@ riskiest implementation detail. Specification:
 
 ## 5. CREDENTIAL MODEL & CONFIG
 
-### 5.1 The two-value policy model
+### 5.1 Policy model and specialized inject modes
 
-Every destination host maps to exactly one of two policy values:
+Every destination host maps to exactly one policy kind:
 
 - **`allow`** — opaque tunnel; whatever credential the client holds is used
   directly and only egress-contained. The credential lives *in the box*.
-- **`inject`** — cove MITMs and adds a host-side credential; the real key is
-  *never in the box*.
+- **`inject`** — header replacement, including the `github-basic` transform;
+  the real key is *never in the box*.
+- **`sigv4`** — the v1 S3-only re-signer. It MITMs, enforces its S3 policy,
+  spools finite bodies, and signs with host-side credentials.
+- **`mtls`** — upstream client-certificate termination restricted by exact host,
+  method, and path-prefix policy.
 
-There is **no third value.** A `sign` broker (for SigV4/mTLS) is a project, not
-a feature; the key `sign` is *reserved* in the schema and MUST be rejected with
-"not implemented in v0" if used.
+`allow`, `inject`, `sigv4`, and `mtls` are mutually exclusive for a host rule;
+equal-key cross-kind duplicates are configuration errors. These are specialized
+proxy injection modes, not a general signing broker. `sigv4` is deliberately a
+policy-defined S3 subset, not general AWS support.
 
 ### 5.2 Credential classes → policy mapping
 
@@ -923,7 +928,7 @@ From the CLI-auth research (three classes):
 |---|---|---|---|---|
 | **A** | Simple bearer / API key | Anthropic API key, Hetzner token, GitHub PAT, Cloudflare token, Runpod key, HF token, Gemini API key, **kimi API key** | **`inject`** | Key can be added as a header host-side; keep it out of the box. |
 | **B** | OAuth session (access+refresh) | claude OAuth, codex ChatGPT, gemini Google, gh OAuth, wrangler OAuth | **`allow`** + **`cred_mount`** (session lives in box) — EXCEPT claude OAuth, which is `inject` via host-side token+refresh (§5.4) | The session token *is* the auth material the client refreshes; generally cannot be injected. |
-| **C** | Request-signed (SigV4) / mTLS | aws, s5cmd | **`allow`** + **`cred_mount`**/`env_passthrough` | Signature is derived from the secret over request contents; header injection cannot work. User pairs with short-lived STS creds; cove ships no signing broker. |
+| **C** | Request-signed (SigV4) / mTLS | aws, s5cmd / partner API | **`sigv4`** or **`mtls`** when the narrow policy fits; otherwise **`allow`** + short-lived `cred_mount`/`env_passthrough` | A generic header cannot replace a request signature or client certificate, but cove implements these two constrained host-side forms. |
 
 **kimi reclassification (explicit, was Class-B in FINAL-DESIGN):** kimi is run in
 its **API-key mode** here, which is a simple bearer → **Class-A `inject`**. This
@@ -934,13 +939,12 @@ the box" guarantee is achievable via the base-URL loopback (§3.7b). Users who
 insist on kimi OAuth instead add kimi's OAuth hosts to `allow` + `cred_mount`
 `~/.kimi` (Class-B handling); that path is documented but not the seed default.
 
-**Class-B/C provisioning (B4 — the mechanism):** Class-B/C credentials cannot be
-injected; the tool needs its **session files** (e.g. `~/.codex/auth.json`,
-`~/.config/gh/hosts.yml`, `~/.aws/credentials`) present in the box. v0 provides
-these via the explicit opt-in **`cred_mount`** bind (and `env_passthrough` for
-env-delivered creds like `AWS_*`) — see §5.7. Without a `cred_mount`/passthrough
-entry, a Class-B tool has no credential and simply cannot authenticate; cove does
-NOT silently mount anything.
+**Class-B/C provisioning:** OAuth sessions and unsupported request-signed modes
+still need explicit `cred_mount` or `env_passthrough` and therefore live in the
+box. The exception is a configured `[[sigv4]]` or `[[mtls]]` policy: it keeps
+its constrained host-side credential material outside the box. Without an
+active specialized stanza or explicit mount/passthrough, cove does not silently
+provide a credential.
 
 **Honest limits per class:** Class-B/C credentials, once `cred_mount`ed, **live
 in the box**: exfil-contained by egress policy but NOT theft-proof (a compromised
@@ -948,7 +952,63 @@ agent can read the mounted session file) and misusable at their allowed host (th
 oracle residual, §8). Only Class-A keys get the strong "never in the box"
 guarantee.
 
-### 5.3 Config file schema
+### 5.3 Current config schema, outcomes, and local verification
+
+`[[inject]]` supplies header credentials. Its normal schema is `host`,
+`header_name`, `header_template` containing `{secret}`, `secret`, optional
+`strip_headers`, `dummy_env`, `base_url_env`/`base_url_value`, `alpn`, and
+credential metadata (`issuer`, `max_ttl`, `bootstrap_ref`). The Git transform is
+instead `host = "github.com"`, `transform = "github-basic"`,
+`header_name = "Authorization"`, `basic_username = "x-access-token"`, `secret`,
+`github_repositories`, and `allowed_methods`; it is limited to scoped Git
+smart-HTTP requests. GitHub API PAT injection is an ordinary Bearer `[[inject]]`
+for `api.github.com`. The shipped defaults retain GitHub OAuth `allow` entries;
+PAT migration removes both `github.com` and `api.github.com` allow entries and
+enables both commented stanzas.
+
+`[[sigv4]]` requires `host`, `access_key_id`, `secret_access_key`, optional
+`session_token`, `account_id`, `service = "s3"`, `region`,
+`allowed_methods`, `allowed_operations`, `allowed_resources`,
+`max_body_bytes`, and optional `allow_unsigned_payload`, `alpn`, and credential
+metadata. `[[mtls]]` requires exact `host`, `client_cert`, `client_key`,
+`allowed_methods`, `allowed_path_prefixes`, and optional `alpn` and metadata.
+Secret references are `file:`, `env:`, or `json:`; examples must never contain
+real values or `keyring:` references.
+
+#### 5.3.1 S3 SigV4 supported/rejected matrix
+
+| Mode | Result |
+|---|---|
+| Header `AWS4-HMAC-SHA256`, finite S3 payload, empty payload, ordinary transfer chunking | Supported: buffer/hash the true payload and replace the dummy signature. |
+| `UNSIGNED-PAYLOAD` | Supported only with `allow_unsigned_payload=true`; still buffered and capped. |
+| Session credentials and rotated file/json sources | Supported; real session token is injected and file/json sources are resolved per request. |
+| Get/Head/Put/Delete/List and constrained Copy | Supported only when method, classifier operation, and every resource match policy. |
+| Presigned query | 400 `presigned_url`. |
+| AWS streaming payload/trailers, `aws-chunked`, WebSocket/event stream | 400 `streaming_signature`. |
+| SigV4a/MRAP | 400 `sigv4a`; unsupported endpoint forms are config errors. |
+| Multipart | 403 `policy_operation`. |
+| Non-S3, FIPS/dualstack/accelerate/access-point/Outposts/China/Gov/custom endpoint forms | Config error. |
+| Body cap/spool failure; missing real secret or signer/certificate construction | 413 `body_too_large`; spool failure is 502 `spool_failure` (local host-storage failure, audited `policy:"deny"`, no upstream contacted); otherwise 502 `secret_unavailable`; no upstream dial. |
+
+#### 5.3.2 Audit and test contract
+
+Audit `policy` remains `allow`, `inject`, or `deny` (with the existing separate
+`warn` record). `reason` is a stable non-secret code: `malformed_request`, `presigned_url`,
+`streaming_signature`, `sigv4a`, `policy_method`, `policy_operation`,
+`policy_resource`, `policy_header`, `body_too_large`, `spool_failure`,
+`secret_unavailable`, `mtls_not_requested`, or `upstream_tls`.
+Successful specialized requests use `policy:"inject"`; local policy/malformed
+failures use `policy:"deny"`. Optional non-secret fields are `auth_mode`
+(`header`, `github-basic`, `sigv4`, `mtls`), `operation`, `resource`, `account`,
+`region`, and `service`. Audit records never include credential values, access
+key IDs, signatures, tokens, canonical requests, or certificate private keys.
+
+The test suite uses only local harnesses: a Git smart-HTTP backend for the
+GitHub Basic transform, a hand-rolled SigV4 verifier that does not import the
+AWS SDK, and a locally generated mTLS verifying upstream. No test contacts AWS,
+GitHub, an issuer, or hardware.
+
+### 5.3a Legacy v0 configuration reference (superseded; non-normative)
 
 - **Location:** `~/.config/cove/config.toml` (`$XDG_CONFIG_HOME` respected).
   **Decision D7 (resolved, single path):** the config is TOML and cove **vendors
@@ -1071,15 +1131,13 @@ not exist on the host.
 
 ### 5.5 The complete pre-seeded default config
 
-Shipped verbatim as the default `~/.config/cove/config.toml` (created by
-`cove setup` if absent). **This seed MUST pass `Validate()` with zero conflicts
-(B1);** every host below is `allow` XOR `inject`. A unit test loads this exact
-seed and asserts `Validate()` returns nil (§15.1). Secret paths point at files
-the user populates; **inert-inject rule:** an `inject` stanza whose secret file
-is absent still **permits egress to that host but injects nothing** (degrades to
-an opaque tunnel) and cove warns once. This keeps unauthenticated use working
-(e.g. anonymous huggingface downloads) while never failing closed on a missing
-key in a way that breaks installs.
+The authoritative shipped seed is
+[`internal/config/default_config.toml`](../internal/config/default_config.toml).
+It keeps GitHub OAuth `allow` defaults enabled and contains two commented PAT
+stanzas (API Bearer and scoped Git Basic); the documented migration removes both
+conflicting allow entries before enabling them. It contains no enabled
+GitHub-Basic, SigV4, or mTLS destination. The following historical v0 seed
+illustration is retained only for background and is not normative.
 
 ```toml
 [options]
@@ -1193,9 +1251,8 @@ header_template = "Bearer {secret}"
 secret        = "file:~/.config/cove/secrets/runpod-key"
 dummy_env     = "RUNPOD_API_KEY"
 
-# github — PAT mode (class A). MUTUALLY EXCLUSIVE with OAuth 'allow' of api.github.com.
-# Ships COMMENTED so OAuth github (in allow) is the default. To use injected PAT:
-# uncomment AND remove "api.github.com" from the allow list (else Validate() errors).
+# Historical v0 example only; the shipped seed documents the current paired
+# GitHub API Bearer + Git Basic migration.
 # [[inject]]
 # host          = "api.github.com"
 # header_name   = "Authorization"
@@ -1218,7 +1275,7 @@ Notes baked into the seed:
   mount, so the §5.7 concurrency caveat applies: concurrent cove Codex sessions
   and host-side Codex can race while writing the same auth file.
 
-### 5.6 Adding a new CLI with zero code
+### 5.6 Adding a new CLI with zero code (legacy general guidance)
 
 The procedure, no recompile:
 
@@ -1229,18 +1286,20 @@ The procedure, no recompile:
 3. **Class B/C** (contain-only): add the tool's host(s) to the `allow` list AND
    provision its session into the box via `cred_mount` (session files) or
    `env_passthrough` (env-delivered creds) — see §5.7.
-4. `SIGHUP` the proxy (or it auto-reloads on next session).
+4. `SIGHUP` the proxy (or it auto-reloads on next session). New signing or mTLS
+   shapes require an explicit implementation and test harness; do not treat this
+   legacy recipe as permission to configure generic signing.
 
 No Go code changes for any of the researched CLIs or new ones matching these
 shapes. Only genuinely novel auth (mTLS, non-HTTP, new signing) needs code — and
 that is explicitly out of scope (§1.5).
 
-### 5.7 Class-B/C credential provisioning (the concrete v0 mechanism — B4)
+### 5.7 Class-B/C credential provisioning (for allow fallback)
 
-Class-B (OAuth session) and Class-C (SigV4) credentials cannot be injected; the
-tool must find its own credential material inside the box. cove provides two
-explicit, opt-in mechanisms. Both are **off by default** (empty lists) so the
-deny-by-default box stays secret-free until the user consciously opts in.
+OAuth sessions and any unsupported SigV4/mTLS mode use these explicit, opt-in
+mechanisms. Both are **off by default** (empty lists) so the deny-by-default box
+stays secret-free until the user consciously opts in. This section describes the
+`allow` fallback, not the specialized `[[sigv4]]`/`[[mtls]]` modes in §5.3.
 
 - **`cred_mount` (session FILES):** a list in `[options]` of host paths
   bind-mounted into the box at the **same relative path under the box HOME
@@ -1526,10 +1585,14 @@ host user. (Proven by the foundational spike.)
    authorized Anthropic calls. The proxy is a usable oracle for exactly the
    allowed operations. Mitigation: audit log only. v0 ships no per-path policy,
    no rate limits, no approval gates.
-2. **No protection for Class-B/C credentials in the box.** codex ChatGPT OAuth,
-   gemini Google OAuth, gh OAuth, aws SigV4 keys live in the box (they cannot be
-   injected). They are exfil-contained (cannot leave to a non-allowed host) but
-   can be *misused* at their allowed host, and a box-escape would read them.
+2. **No protection for Class-B/C credentials in the box.** In the
+   unsupported-mode `allow` fallback, codex ChatGPT OAuth, gemini Google OAuth,
+   gh OAuth, and general AWS SigV4 keys live in the box. They are
+   exfil-contained (cannot leave to a non-allowed host) but can be *misused* at
+   their allowed host, and a box-escape would read them. The supported
+   policy-defined S3 subset instead uses the host-side SigV4 signer described
+   in [the supported/rejected matrix](#35-supportedrejected-matrix); its
+   residual is a credentialed S3-operation oracle within that policy.
 3. **No defense against kernel escape.** Namespaces, not a hypervisor, not
    gVisor. A kernel exploit defeats every boundary. This was a deliberate cost
    trade (gVisor's 1.64x CPU / ~6x RSS rejected; kernel escape is not this
@@ -1546,9 +1609,11 @@ host user. (Proven by the foundational spike.)
 - **Misuse-oracle:** injected + allowed hosts are usable by a compromised agent
   within the credential's authority. *Mitigation: audit log; user keeps tokens
   scoped/short-lived.*
-- **Signed-class keys in box:** SigV4/OAuth material lives in the box; box
-  escape or misuse exposes it. *Mitigation: STS/short-lived creds; egress
-  containment limits exfil.*
+- **Signed-class keys in box:** in the unsupported-mode `allow` fallback,
+  general SigV4/OAuth material lives in the box; box escape or misuse exposes
+  it. The supported host-side S3 SigV4 signer keeps its keys out of the box but
+  remains an authorized, policy-bounded operation oracle. *Mitigation:
+  STS/short-lived creds; egress containment limits exfil.*
 - **Kernel escape:** unpatched namespace/kernel bug. *Mitigation: keep the host
   patched; accept the residual (documented, deliberate).*
 - **h2 MITM correctness bug:** a subtle streaming/framing bug could corrupt or

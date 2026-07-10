@@ -10,20 +10,27 @@ import (
 )
 
 type AuditRecord struct {
-	TS      time.Time `json:"ts"`
-	Session string    `json:"session"`
-	Policy  string    `json:"policy"`
-	Host    string    `json:"host"`
-	Port    int       `json:"port"`
-	Method  string    `json:"method,omitempty"`
-	Path    string    `json:"path,omitempty"`
-	Status  int       `json:"status,omitempty"`
-	BytesUp int64     `json:"bytes_up"`
-	BytesDn int64     `json:"bytes_down"`
-	DurMS   int64     `json:"dur_ms"`
-	Level   string    `json:"level,omitempty"`
-	Message string    `json:"message,omitempty"`
-	Agent   string    `json:"agent,omitempty"`
+	TS        time.Time `json:"ts"`
+	Session   string    `json:"session"`
+	Policy    string    `json:"policy"`
+	Host      string    `json:"host"`
+	Port      int       `json:"port"`
+	Method    string    `json:"method,omitempty"`
+	Path      string    `json:"path,omitempty"`
+	Status    int       `json:"status,omitempty"`
+	BytesUp   int64     `json:"bytes_up"`
+	BytesDn   int64     `json:"bytes_down"`
+	DurMS     int64     `json:"dur_ms"`
+	Level     string    `json:"level,omitempty"`
+	Message   string    `json:"message,omitempty"`
+	Agent     string    `json:"agent,omitempty"`
+	AuthMode  string    `json:"auth_mode,omitempty"`
+	Reason    string    `json:"reason,omitempty"`
+	Operation string    `json:"operation,omitempty"`
+	Resource  string    `json:"resource,omitempty"`
+	Account   string    `json:"account,omitempty"`
+	Region    string    `json:"region,omitempty"`
+	Service   string    `json:"service,omitempty"`
 }
 
 type countingReadCloser struct {

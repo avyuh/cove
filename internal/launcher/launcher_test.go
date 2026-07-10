@@ -8,7 +8,90 @@ import (
 	"testing"
 
 	"cove/internal/config"
+	"cove/internal/secret"
 )
+
+func TestDryRunCredentialPostureDoesNotResolveSecrets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-token")
+	const secretValue = "real-secret-value-must-not-be-reported"
+	if err := os.WriteFile(path, []byte(secretValue+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ref := "file:" + path
+	cfg := &config.Config{
+		Inject: []config.InjectStanza{{
+			Host: "api.example.com", Secret: ref,
+			Issuer: "human:security-ceremony", MaxTTL: "30m", BootstrapRef: "human:yubikey-slot-9a",
+		}},
+		SigV4: []config.SigV4Stanza{{
+			Host: "my-bucket.s3.us-east-1.amazonaws.com", AccessKeyID: ref, SecretAccessKey: ref, SessionToken: ref,
+		}},
+		MTLS: []config.MTLSStanza{{
+			Host: "partner.example.com", ClientCert: ref, ClientKey: ref,
+		}},
+	}
+
+	report := captureStdout(t, func() {
+		code, err := Run(cfg, Opts{DryRun: true, Project: "demo", AgentArgv: []string{"agent"}})
+		if err != nil || code != 0 {
+			t.Fatalf("Run() = (%d, %v), want (0, nil)", code, err)
+		}
+	})
+	for _, want := range []string{"credential source: inject", "credential source: sigv4", "credential source: mtls", ref, "issuer=human:security-ceremony", "bootstrap_ref=human:yubikey-slot-9a", "bootstrap/issuer: not recorded"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("report missing %q:\n%s", want, report)
+		}
+	}
+	if got := strings.Count(report, "bootstrap/issuer: not recorded"); got != 2 {
+		t.Errorf("missing metadata warnings = %d, want 2 (only unrecorded stanzas)", got)
+	}
+	if strings.Contains(report, secretValue) {
+		t.Fatalf("report leaked resolved secret value: %q", report)
+	}
+}
+
+func TestSecretCacheObservesAtomicReplacement(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "credential")
+	if err := os.WriteFile(path, []byte("first\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cache := secret.NewCache(nil)
+	ref := "file:" + path
+	if got, err := cache.Resolve(ref); err != nil || got != "first" {
+		t.Fatalf("initial Resolve() = %q, %v", got, err)
+	}
+	tmp := filepath.Join(dir, "credential.new")
+	if err := os.WriteFile(tmp, []byte("second\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := cache.Resolve(ref); err != nil || got != "second" {
+		t.Fatalf("Resolve() after atomic replacement = %q, %v", got, err)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = old })
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
 
 func TestInitStatusFailureMapsAgentNotFoundTo127(t *testing.T) {
 	code, err := initStatusFailure("ERR agent-not-found nonesuch-binary")
@@ -281,6 +364,122 @@ base_url_value = "https://api.example.com"
 	}
 	if d.Inject[0].Host != "api.example.com" || d.Inject[0].Port != 9443 {
 		t.Fatalf("inject target = %s:%d, want api.example.com:9443", d.Inject[0].Host, d.Inject[0].Port)
+	}
+}
+
+func TestBuildDirectivesAddsSigV4Dummies(t *testing.T) {
+	for name, regions := range map[string][]string{
+		"agreed":    {"us-east-1", "us-east-1"},
+		"disagreed": {"us-east-1", "us-west-2"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfgHome := t.TempDir()
+			cfgDir := filepath.Join(cfgHome, "cove")
+			if err := os.MkdirAll(cfgDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(cfgDir, "ca.pem"), []byte("test-ca\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("XDG_CONFIG_HOME", cfgHome)
+			cfg := &config.Config{SigV4: []config.SigV4Stanza{{Region: regions[0]}, {Region: regions[1]}}}
+			d, err := buildDirectives(cfg, Opts{AgentArgv: []string{"/bin/true"}}, t.TempDir(), "/tmp/proxy.sock")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for key, want := range map[string]string{
+				"AWS_ACCESS_KEY_ID":         "COVE0000000000000000",
+				"AWS_SECRET_ACCESS_KEY":     "cove-dummy-secret-access-key-do-not-use",
+				"AWS_SESSION_TOKEN":         "cove-dummy-session-token-do-not-use",
+				"AWS_EC2_METADATA_DISABLED": "true",
+			} {
+				if got := d.DummyEnv[key]; got != want {
+					t.Fatalf("%s = %q, want %q", key, got, want)
+				}
+			}
+			if regions[0] == regions[1] {
+				if d.DummyEnv["AWS_REGION"] != regions[0] || d.DummyEnv["AWS_DEFAULT_REGION"] != regions[0] {
+					t.Fatalf("region dummies = %+v, want %q", d.DummyEnv, regions[0])
+				}
+			} else if _, ok := d.DummyEnv["AWS_REGION"]; ok {
+				t.Fatalf("AWS_REGION should be omitted for conflicting regions: %+v", d.DummyEnv)
+			} else if _, ok := d.DummyEnv["AWS_DEFAULT_REGION"]; ok {
+				t.Fatalf("AWS_DEFAULT_REGION should be omitted for conflicting regions: %+v", d.DummyEnv)
+			}
+		})
+	}
+}
+
+func TestBuildDirectivesDeduplicatesSharedDummyEnv(t *testing.T) {
+	cfgHome := t.TempDir()
+	cfgDir := filepath.Join(cfgHome, "cove")
+	if err := os.MkdirAll(cfgDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "ca.pem"), []byte("test-ca\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	cfg, err := config.LoadBytes([]byte(`
+[[inject]]
+host="api.example.com"
+header_name="Authorization"
+header_template="Bearer {secret}"
+secret="env:API_TOKEN"
+dummy_env="GH_TOKEN"
+dummy_value="cove-dummy-gh-token"
+
+[[inject]]
+host="github.example.com"
+header_name="Authorization"
+header_template="Bearer {secret}"
+secret="env:GIT_TOKEN"
+dummy_env="GH_TOKEN"
+dummy_value="cove-dummy-gh-token"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := buildDirectives(cfg, Opts{AgentArgv: []string{"/bin/true"}}, t.TempDir(), "/tmp/proxy.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.DummyEnv) != 1 || d.DummyEnv["GH_TOKEN"] != "cove-dummy-gh-token" {
+		t.Fatalf("dummy env = %+v, want one shared GH_TOKEN", d.DummyEnv)
+	}
+}
+
+func TestBuildDirectivesCarriesGitHubBasicTransform(t *testing.T) {
+	cfgHome := t.TempDir()
+	cfgDir := filepath.Join(cfgHome, "cove")
+	if err := os.MkdirAll(cfgDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "ca.pem"), []byte("test-ca\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", cfgHome)
+	cfg, err := config.LoadBytes([]byte(`
+[[inject]]
+host="github.com"
+transform="github-basic"
+header_name="Authorization"
+basic_username="x-access-token"
+secret="env:GH_TOKEN"
+dummy_env="GH_TOKEN"
+dummy_value="dummy-only-value"
+github_repositories=["owner/repo"]
+allowed_methods=["GET"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := buildDirectives(cfg, Opts{AgentArgv: []string{"/bin/true"}}, t.TempDir(), "/tmp/proxy.sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Inject) != 1 || d.Inject[0].Transform != "github-basic" || d.Inject[0].DummyValue != "dummy-only-value" {
+		t.Fatalf("inject directives = %+v", d.Inject)
 	}
 }
 

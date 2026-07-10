@@ -45,6 +45,7 @@ type Proxyd struct {
 	log      io.Writer
 	lookupIP lookupIPFunc
 	dialTCP  dialTCPFunc
+	now      func() time.Time
 
 	warnMu        sync.Mutex
 	warnedRelogin map[[32]byte]struct{}
@@ -99,6 +100,7 @@ func Serve(cfg *config.Config, sockPath string) error {
 		stateDir: state,
 		sessDir:  sessions,
 		log:      os.Stderr,
+		now:      proxyNow,
 	}
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
@@ -117,6 +119,8 @@ func Serve(cfg *config.Config, sockPath string) error {
 		go p.handleControl(c)
 	}
 }
+
+func proxyNow() time.Time { return time.Now() }
 
 var ErrDenied = errors.New("denied by policy")
 

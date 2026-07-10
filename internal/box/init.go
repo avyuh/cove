@@ -26,6 +26,7 @@ type Directives struct {
 	CAPEM          []byte
 	CABundlePEM    []byte
 	Inject         []InjectDirective
+	DummyEnv       map[string]string
 	CredMount      []CredMount
 	RuntimeMount   []string
 	EnvPassthrough map[string]string
@@ -34,6 +35,7 @@ type Directives struct {
 type InjectDirective struct {
 	Host         string
 	Port         int
+	Transform    string
 	DummyEnv     string
 	DummyValue   string
 	BaseURLEnv   string
