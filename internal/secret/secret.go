@@ -13,6 +13,30 @@ import (
 
 var ErrNotImplemented = errors.New("secret backend not implemented")
 
+// Availability deliberately describes only whether a reference can be used. It
+// never carries secret material, making it safe for status output.
+type Availability int
+
+const (
+	Unavailable Availability = iota
+	Available
+	Invalid
+)
+
+// Check validates that ref is present and non-empty without returning its
+// value.  It is intentionally separate from Resolve so callers cannot
+// accidentally print a credential while reporting readiness.
+func Check(ref string) Availability {
+	v, err := Resolve(ref)
+	if err != nil || strings.TrimSpace(v) == "" {
+		if err != nil {
+			return Invalid
+		}
+		return Unavailable
+	}
+	return Available
+}
+
 type Cache struct {
 	mu      sync.Mutex
 	entries map[string]cacheEntry

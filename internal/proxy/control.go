@@ -19,10 +19,11 @@ var sessionIDRE = regexp.MustCompile(`^[0-9a-f]+$`)
 // RegisterRequest is deliberately a new, versioned protocol.  Do not add these
 // fields to REGISTER: old daemons silently ignore trailing whitespace fields.
 type RegisterRequest struct {
-	Session string `json:"session"`
-	Agent   string `json:"agent"`
-	Audit   *bool  `json:"audit"`
-	Project string `json:"project"`
+	Session    string `json:"session"`
+	Agent      string `json:"agent"`
+	Audit      *bool  `json:"audit"`
+	Project    string `json:"project"`
+	Diagnostic bool   `json:"diagnostic"`
 }
 
 type controlOK struct {

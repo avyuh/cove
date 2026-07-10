@@ -3,6 +3,8 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,6 +53,54 @@ func TestConnRejectsOffAllowlistBeforeResolve(t *testing.T) {
 	}
 	if got := lookups.Load(); got != 0 {
 		t.Fatalf("resolver calls = %d, want 0", got)
+	}
+}
+
+func TestDiagnosticStatusIsContainedAndSessionGated(t *testing.T) {
+	ca, pemBytes, _ := newTestCA(t)
+	var dials atomic.Int32
+	newConn := func(diagnostic bool) (net.Conn, *Proxyd) {
+		client, server := net.Pipe()
+		p := &Proxyd{log: io.Discard, ca: ca, matcher: NewMatcher(&config.Config{}), dialTCP: func(context.Context, string, string) (net.Conn, error) {
+			dials.Add(1)
+			return nil, fmt.Errorf("must not dial")
+		}}
+		c := &Conn{raw: server, br: bufio.NewReader(server), sess: Session{ID: "abc", Audit: false, Diagnostic: diagnostic}, proxy: p, matcher: p.matcher, ca: ca, started: time.Now()}
+		go c.handle()
+		return client, p
+	}
+	client, _ := newConn(true)
+	defer client.Close()
+	if _, err := io.WriteString(client, "CONNECT status.cove.invalid:443 HTTP/1.1\r\nHost: status.cove.invalid:443\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if line, err := bufio.NewReader(client).ReadString('\n'); err != nil || !strings.Contains(line, "200") {
+		t.Fatalf("CONNECT = %q, %v", line, err)
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(pemBytes)
+	tlsClient := tls.Client(client, &tls.Config{RootCAs: pool, ServerName: "status.cove.invalid"})
+	if err := tlsClient.Handshake(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(tlsClient, "GET / HTTP/1.1\r\nHost: status.cove.invalid\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(tlsClient).ReadString('\n')
+	if err != nil || !strings.Contains(line, "204") {
+		t.Fatalf("diagnostic response = %q, %v", line, err)
+	}
+	ordinary, _ := newConn(false)
+	defer ordinary.Close()
+	if _, err := io.WriteString(ordinary, "CONNECT status.cove.invalid:443 HTTP/1.1\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	line, err = bufio.NewReader(ordinary).ReadString('\n')
+	if err != nil || !strings.Contains(line, "403") {
+		t.Fatalf("ordinary response = %q, %v", line, err)
+	}
+	if got := dials.Load(); got != 0 {
+		t.Fatalf("diagnostic host dialed %d times", got)
 	}
 }
 

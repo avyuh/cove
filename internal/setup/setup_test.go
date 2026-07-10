@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"syscall"
 	"testing"
+
+	"cove/internal/proxy"
 )
 
 func TestEnsureUserArtifactsIdempotentAndModes(t *testing.T) {
@@ -80,6 +82,24 @@ func TestGenerateCAProperties(t *testing.T) {
 	wantUsage := x509.KeyUsageCertSign | x509.KeyUsageCRLSign
 	if cert.KeyUsage&wantUsage != wantUsage {
 		t.Fatalf("key usage = %v, want certSign|crlSign", cert.KeyUsage)
+	}
+}
+
+func TestEnsureUserArtifactsRecoversInterruptedCAPair(t *testing.T) {
+	home := t.TempDir()
+	u := invokingUser{UID: os.Getuid(), GID: os.Getgid(), Name: "test", Home: home}
+	if _, err := ensureUserArtifacts(u); err != nil {
+		t.Fatal(err)
+	}
+	key := filepath.Join(home, ".config", "cove", "ca-key.pem")
+	if err := os.Remove(key); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ensureUserArtifacts(u); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := proxy.LoadCA(filepath.Join(home, ".config", "cove", "ca.pem"), key); err != nil {
+		t.Fatalf("recovered CA pair invalid: %v", err)
 	}
 }
 

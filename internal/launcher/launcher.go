@@ -533,10 +533,17 @@ func pingProxy(sock string) error {
 		return err
 	}
 	line = strings.TrimSpace(line)
-	want := "PONG " + version.Version
-	if line != want {
+	fields := strings.Fields(line)
+	if len(fields) < 2 || fields[0] != "PONG" || fields[1] != version.Version {
 		return fmt.Errorf("bad proxy health response %q", line)
 	}
+	for _, field := range fields[2:] {
+		if field == "control=2" {
+			return nil
+		}
+	}
+	// Older daemons are still recognized by PING; registration will provide the
+	// versioned control error rather than unlinking their live socket.
 	return nil
 }
 

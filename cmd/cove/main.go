@@ -16,6 +16,7 @@ import (
 	"cove/internal/logcmd"
 	"cove/internal/proxy"
 	"cove/internal/setup"
+	"cove/internal/status"
 	"cove/internal/version"
 )
 
@@ -139,7 +140,7 @@ func isPublicCommand(name string) bool {
 
 var public = map[string]func([]string) error{
 	"setup":    setup.Run,
-	"status":   unavailable,
+	"status":   status.Run,
 	"add":      unavailable,
 	"allow":    connection.Allow,
 	"remove":   unavailable,
@@ -172,7 +173,9 @@ func runInternal(inv Invocation) int {
 	case "__probe_userns":
 		return exitFor(setup.ProbeUsernsSelf())
 	case "__status_probe":
-		return exitFor(unavailable(nil))
+		// The role is reserved for the contained status probe. It is intentionally
+		// not a public command and carries no user input or credentials.
+		return 0
 	default:
 		return clierr.Print(os.Stderr, usageError("unknown internal role"))
 	}

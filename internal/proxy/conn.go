@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -72,6 +73,19 @@ func (c *Conn) handle() {
 			break
 		}
 	}
+	// This is deliberately before policy matching: status.cove.invalid is not a
+	// matcher rule and is usable only by an explicitly diagnostic control
+	// session. It never reaches DNS or dialAllowed.
+	if t.Host == "status.cove.invalid" && t.Port == 443 {
+		if !c.sess.Diagnostic {
+			c.denyHostPolicy(t)
+			return
+		}
+		if err := c.serveDiagnosticStatus(t); err != nil && !isClosed(err) {
+			fmt.Fprintf(c.proxy.log, "cove proxyd: status diagnostic: %v\n", err)
+		}
+		return
+	}
 	policy, inject := c.matcher.Match(t.Host, t.Port)
 	if policy == PolicyDeny {
 		c.denyHostPolicy(t)
@@ -90,6 +104,32 @@ func (c *Conn) handle() {
 	if err := c.tunnel(t, policy); err != nil {
 		fmt.Fprintf(c.proxy.log, "cove proxyd: tunnel %s:%d: %v\n", t.Host, t.Port, err)
 	}
+}
+
+func (c *Conn) serveDiagnosticStatus(t Target) error {
+	leaf, err := c.ca.LeafFor(t.Host)
+	if err != nil {
+		return err
+	}
+	if _, err := io.WriteString(c.raw, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		return err
+	}
+	tconn := tls.Server(c.raw, &tls.Config{Certificates: []tls.Certificate{*leaf}, MinVersion: tls.VersionTLS12})
+	defer tconn.Close()
+	if err := tconn.Handshake(); err != nil {
+		return err
+	}
+	req, err := http.ReadRequest(bufio.NewReader(tconn))
+	if err != nil {
+		return err
+	}
+	defer req.Body.Close()
+	if req.Method != http.MethodGet || req.URL.Path != "/" {
+		_, err = io.WriteString(tconn, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+		return err
+	}
+	_, err = io.WriteString(tconn, "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	return err
 }
 
 func (c *Conn) serveInjectPolicy(raw net.Conn, br *bufio.Reader, t Target, policy *InjectPolicy) error {

@@ -23,6 +23,8 @@ import (
 
 	"cove/internal/clierr"
 	"cove/internal/config"
+	"cove/internal/proxy"
+	"cove/internal/status"
 )
 
 type setupError struct {
@@ -56,6 +58,7 @@ func Run(args []string) error {
 	fs := flag.NewFlagSet("cove setup", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	help := fs.Bool("help", false, "show help")
+	verbose := fs.Bool("verbose", false, "show setup details")
 	if err := fs.Parse(args); err != nil {
 		return setupError{code: 64, msg: err.Error()}
 	}
@@ -99,27 +102,17 @@ func Run(args []string) error {
 		return setupError{code: 77, msg: fmt.Sprintf("cove setup: userns probe still fails after setup: %v", err)}
 	}
 
-	certPath := filepath.Join(u.Home, ".config", "cove", "ca.pem")
-	fp, err := caFingerprint(certPath)
-	if err != nil {
-		return err
-	}
 	configPath := filepath.Join(u.Home, ".config", "cove", "config.toml")
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return err
+	if *verbose {
+		for _, note := range notes {
+			fmt.Fprintf(os.Stderr, "cove setup: %s\n", note)
+		}
+		if !changed {
+			fmt.Fprintln(os.Stderr, "cove setup: no changes")
+		}
 	}
-
-	for _, note := range notes {
-		fmt.Fprintf(os.Stderr, "cove setup: %s\n", note)
-	}
-	if !changed {
-		fmt.Fprintln(os.Stderr, "cove setup: no changes")
-	}
-	fmt.Fprintf(os.Stderr, "cove is ready: userns ok; CA SHA-256 %s; config %s\n", fp, configPath)
-	for _, line := range credentialPostureLines(cfg) {
-		fmt.Fprintf(os.Stderr, "cove setup: %s\n", line)
-	}
+	report := status.RunChecks(status.Options{Verbose: *verbose, ConfigPath: configPath, Userns: func() error { return probeUsernsAs(u, exe) }})
+	status.Render(os.Stdout, report, *verbose)
 	return nil
 }
 
@@ -303,7 +296,7 @@ func ensureUserArtifacts(u invokingUser) ([]string, error) {
 
 	configPath := filepath.Join(u.Home, ".config", "cove", "config.toml")
 	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
-		if err := os.WriteFile(configPath, []byte(config.DefaultConfig), 0600); err != nil {
+		if err := config.CreateIfAbsentAtomic(configPath, []byte(config.DefaultConfig)); err != nil {
 			return nil, err
 		}
 		if err := chmodChown(configPath, 0600, u); err != nil {
@@ -360,10 +353,53 @@ func generateCA(certPath, keyPath string, u invokingUser) error {
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-	if err := os.WriteFile(certPath, certPEM, 0644); err != nil {
+	// Build and verify the complete pair off to the side.  Committing the key
+	// first is intentional: an interruption leaves a recoverable mismatch, not
+	// a public certificate whose private material was never made durable.
+	dir := filepath.Dir(certPath)
+	keyTmp, err := os.CreateTemp(dir, ".ca-key-")
+	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(keyPath, keyPEM, 0600); err != nil {
+	certTmp, err := os.CreateTemp(dir, ".ca-cert-")
+	if err != nil {
+		_ = os.Remove(keyTmp.Name())
+		_ = keyTmp.Close()
+		return err
+	}
+	defer os.Remove(keyTmp.Name())
+	defer os.Remove(certTmp.Name())
+	if err := keyTmp.Chmod(0600); err != nil {
+		return err
+	}
+	if _, err := keyTmp.Write(keyPEM); err != nil {
+		return err
+	}
+	if err := keyTmp.Sync(); err != nil {
+		return err
+	}
+	if err := keyTmp.Close(); err != nil {
+		return err
+	}
+	if err := certTmp.Chmod(0644); err != nil {
+		return err
+	}
+	if _, err := certTmp.Write(certPEM); err != nil {
+		return err
+	}
+	if err := certTmp.Sync(); err != nil {
+		return err
+	}
+	if err := certTmp.Close(); err != nil {
+		return err
+	}
+	if _, err := proxy.LoadCA(certTmp.Name(), keyTmp.Name()); err != nil {
+		return err
+	}
+	if err := os.Rename(keyTmp.Name(), keyPath); err != nil {
+		return err
+	}
+	if err := os.Rename(certTmp.Name(), certPath); err != nil {
 		return err
 	}
 	if err := chmodChown(certPath, 0644, u); err != nil {

@@ -163,7 +163,7 @@ func (p *Proxyd) handleControl(c net.Conn) {
 	}
 	line = strings.TrimSpace(line)
 	if line == "PING" {
-		fmt.Fprintf(c, "PONG %s\n", version.Version)
+		fmt.Fprintf(c, "PONG %s control=2\n", version.Version)
 		return
 	}
 	if line == "RELOAD/2" {
@@ -185,7 +185,7 @@ func (p *Proxyd) handleControl(c net.Conn) {
 			return
 		}
 		_ = p.reload()
-		sess := Session{ID: r.Session, Agent: r.Agent, Audit: *r.Audit, Events: NewSessionEvents(), Diagnostic: r.Project == "diagnostic"}
+		sess := Session{ID: r.Session, Agent: r.Agent, Audit: *r.Audit, Events: NewSessionEvents(), Diagnostic: r.Diagnostic}
 		p.register(c, sess)
 		return
 	}

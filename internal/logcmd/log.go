@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -13,61 +12,131 @@ import (
 	"syscall"
 	"time"
 
+	"cove/internal/clierr"
 	"cove/internal/config"
-	"cove/internal/proxy"
+	"cove/internal/session"
+	"golang.org/x/term"
 )
 
 type Opts struct {
-	Follow   bool
-	Session  string
-	Host     string
-	DenyOnly bool
+	Follow    bool
+	Session   string
+	Host      string
+	DenyOnly  bool
+	JSON      bool
+	Last      bool
+	Blocked   bool
+	Since     time.Time
+	OutputTTY bool
+
+	// resolvedSession is deliberately separate from the command-line selector:
+	// all filtering always uses a complete, unambiguous ID.
+	resolvedSession string
+	auditOff        bool
 }
 
 func Run(args []string) error {
 	fs := flag.NewFlagSet("cove log", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	var opts Opts
+	var since string
 	fs.BoolVar(&opts.Follow, "follow", false, "keep reading new audit records")
 	fs.StringVar(&opts.Session, "session", "", "show records for one session id")
 	fs.StringVar(&opts.Host, "host", "", "show records for one host")
 	fs.BoolVar(&opts.DenyOnly, "deny-only", false, `show records with policy "deny" only`)
+	fs.BoolVar(&opts.Blocked, "blocked", false, `alias for --deny-only`)
+	fs.BoolVar(&opts.JSON, "json", false, "write JSONL")
+	fs.BoolVar(&opts.Last, "last", false, "show the latest session")
+	fs.StringVar(&since, "since", "", "show records since a duration or RFC3339 time")
 	help := fs.Bool("help", false, "show help")
 	fs.BoolVar(help, "h", false, "show help")
 	fs.Usage = func() { usage(fs.Output()) }
 	if err := fs.Parse(args); err != nil {
-		return err
+		return clierr.Wrap(clierr.EXUsage, "invalid log option", nil, "cove help log", err)
 	}
 	if *help {
 		usage(fs.Output())
 		return nil
 	}
+	if fs.NArg() != 0 {
+		return clierr.Wrap(clierr.EXUsage, "log accepts no positional arguments", nil, "cove help log", nil)
+	}
+	if opts.Last && opts.Session != "" {
+		return clierr.Wrap(clierr.EXUsage, "--last conflicts with --session", nil, "cove help log", nil)
+	}
+	if opts.Blocked {
+		opts.DenyOnly = true
+	}
+	if since != "" {
+		v, err := parseSince(since, time.Now())
+		if err != nil {
+			return clierr.Wrap(clierr.EXUsage, "invalid --since value", nil, "cove help log", err)
+		}
+		opts.Since = v
+	}
+	opts.OutputTTY = term.IsTerminal(int(os.Stdout.Fd()))
+
+	// A selector pins follow. Without one, following remains intentionally
+	// unpinned so sessions that begin after cove log starts are visible.
+	selector := opts.Session
+	if opts.Last || (!opts.Follow && selector == "") {
+		selector = "last"
+	}
+	if selector != "" {
+		resolved, err := session.Resolve(config.StateDir(), selector, os.Stderr)
+		if err != nil {
+			// A fresh install has neither session metadata nor an audit file. It
+			// is an empty log, not a usage error merely because there is no
+			// "latest" session to select.
+			if selector == "last" && freshLog(config.StateDir()) {
+				return scanRotated(filepath.Join(config.StateDir(), "audit.log"), opts, os.Stdout)
+			}
+			return err
+		}
+		opts.resolvedSession = resolved.ID
+		opts.Session = resolved.ID
+		opts.auditOff = resolved.Metadata != nil && !resolved.Metadata.Audit
+	}
 	path := filepath.Join(config.StateDir(), "audit.log")
 	if opts.Follow {
 		return follow(path, opts)
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return err
+	return scanRotated(path, opts, os.Stdout)
+}
+
+func freshLog(stateDir string) bool {
+	if _, err := os.Stat(filepath.Join(stateDir, "audit.log")); err == nil {
+		return false
 	}
-	defer f.Close()
-	return scan(f, opts)
+	if entries, err := os.ReadDir(filepath.Join(stateDir, "sessions", "meta")); err == nil && len(entries) != 0 {
+		return false
+	}
+	return true
 }
 
 func follow(path string, opts Opts) error {
 	return followContext(context.Background(), path, opts, os.Stdout, 500*time.Millisecond)
 }
 
-type fileID struct {
-	dev uint64
-	ino uint64
-}
+type fileID struct{ dev, ino uint64 }
 
+// followContext deliberately retains the established reopen/truncate/rewrite
+// state machine. filterAndWrite is the only output seam added around it.
 func followContext(ctx context.Context, path string, opts Opts, out io.Writer, interval time.Duration) error {
 	var off int64
 	var lastID fileID
 	var haveID bool
 	var prefix []byte
+	// watch holds the previous inode between polls. On rotation it lets us
+	// drain writes that landed in the renamed file before switching to the new
+	// audit.log inode.
+	var watch *os.File
+	var watchID fileID
+	defer func() {
+		if watch != nil {
+			_ = watch.Close()
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -76,10 +145,16 @@ func followContext(ctx context.Context, path string, opts Opts, out io.Writer, i
 		}
 		f, err := os.Open(path)
 		if err == nil {
+			var currentID fileID
+			var currentIDOK bool
 			st, statErr := f.Stat()
 			if statErr == nil {
 				id, idOK := statFile(st)
+				currentID, currentIDOK = id, idOK
 				rotated := idOK && (!haveID || id != lastID)
+				if rotated && haveID && watch != nil && watchID == lastID {
+					off = drainFollowFile(watch, off, out, opts)
+				}
 				truncated := st.Size() < off
 				currentPrefix := readPrefix(f, st.Size())
 				rewritten := !rotated && !truncated && len(prefix) > 0 && !hasStoredPrefix(currentPrefix, prefix)
@@ -101,7 +176,7 @@ func followContext(ctx context.Context, path string, opts Opts, out io.Writer, i
 					line, err := r.ReadBytes('\n')
 					if len(line) > 0 && bytes.HasSuffix(line, []byte{'\n'}) {
 						off += int64(len(line))
-						printIfMatchTo(out, line, opts)
+						filterAndWrite(out, line, opts)
 					}
 					if err != nil {
 						break
@@ -109,6 +184,17 @@ func followContext(ctx context.Context, path string, opts Opts, out io.Writer, i
 				}
 			}
 			_ = f.Close()
+			// Keep a descriptor to this inode until the next poll. Closing it
+			// here would create a rotation gap for a writer that still has the
+			// old audit file open.
+			if currentIDOK {
+				if next, openErr := os.Open(path); openErr == nil {
+					if old := watch; old != nil {
+						_ = old.Close()
+					}
+					watch, watchID = next, currentID
+				}
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -118,38 +204,21 @@ func followContext(ctx context.Context, path string, opts Opts, out io.Writer, i
 	}
 }
 
-func scan(r io.Reader, opts Opts) error {
-	return scanTo(r, opts, os.Stdout)
-}
-
-func scanTo(r io.Reader, opts Opts, out io.Writer) error {
-	sc := bufio.NewScanner(r)
-	for sc.Scan() {
-		printIfMatchTo(out, append([]byte{}, append(sc.Bytes(), '\n')...), opts)
+func drainFollowFile(f *os.File, off int64, out io.Writer, opts Opts) int64 {
+	if _, err := f.Seek(off, io.SeekStart); err != nil {
+		return off
 	}
-	return sc.Err()
-}
-
-func printIfMatch(line []byte, opts Opts) {
-	printIfMatchTo(os.Stdout, line, opts)
-}
-
-func printIfMatchTo(out io.Writer, line []byte, opts Opts) bool {
-	var rec proxy.AuditRecord
-	if err := json.Unmarshal(line, &rec); err != nil {
-		return false
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 && bytes.HasSuffix(line, []byte{'\n'}) {
+			off += int64(len(line))
+			filterAndWrite(out, line, opts)
+		}
+		if err != nil {
+			return off
+		}
 	}
-	if opts.DenyOnly && rec.Policy != "deny" {
-		return false
-	}
-	if opts.Session != "" && rec.Session != opts.Session {
-		return false
-	}
-	if opts.Host != "" && rec.Host != opts.Host {
-		return false
-	}
-	fmt.Fprint(out, string(line))
-	return true
 }
 
 func statFile(st os.FileInfo) (fileID, bool) {
@@ -164,8 +233,7 @@ func readPrefix(f *os.File, size int64) []byte {
 	if size <= 0 {
 		return nil
 	}
-	const maxPrefix = 256
-	n := maxPrefix
+	n := 256
 	if size < int64(n) {
 		n = int(size)
 	}
@@ -178,39 +246,23 @@ func readPrefix(f *os.File, size int64) []byte {
 }
 
 func hasStoredPrefix(current, stored []byte) bool {
-	if len(stored) == 0 {
-		return true
-	}
-	if len(current) < len(stored) {
-		return false
-	}
-	return bytes.Equal(current[:len(stored)], stored)
+	return len(stored) == 0 || (len(current) >= len(stored) && bytes.Equal(current[:len(stored)], stored))
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, `usage: cove log [--follow] [--session ID] [--host HOST] [--deny-only]
+	fmt.Fprint(w, `usage: cove log [--follow] [--last | --session ID] [--host HOST] [--blocked | --deny-only] [--since 2h|RFC3339] [--json]
 
-Read the JSONL audit trail for cove's credential firewall.
-
-By default, cove log prints existing records from:
-  $XDG_STATE_HOME/cove/audit.log
-  ~/.local/state/cove/audit.log when XDG_STATE_HOME is unset
-
-Options compose: for example, --deny-only --host evil.example.com prints only
-denied records for that host. Malformed records and half-written trailing lines
-are skipped. With --follow, cove keeps reading new records and reopens the log
-when it is rotated or truncated.
+Read audit records. Non-terminal output and --json preserve matching JSONL bytes exactly.
 
 Options:
       --follow       keep reading new audit records
-      --session ID   show records for one session id
+      --last         show the latest session (the default without --follow)
+      --session ID   show one full or unique-prefix session ID
       --host HOST    show records for one host
+      --blocked      alias for --deny-only
       --deny-only    show records with policy "deny" only
+      --since VALUE  positive duration or RFC3339 timestamp
+      --json         write raw JSONL even to a terminal
   -h, --help         show help
-
-Examples:
-  cove log --deny-only
-  cove log --follow --deny-only
-  cove log --session 1a2b3c4d --host api.anthropic.com
 `)
 }
