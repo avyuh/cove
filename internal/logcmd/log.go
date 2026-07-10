@@ -47,6 +47,8 @@ func Run(args []string) error {
 	fs.BoolVar(&opts.Blocked, "blocked", false, `alias for --deny-only`)
 	fs.BoolVar(&opts.JSON, "json", false, "write JSONL")
 	fs.BoolVar(&opts.Last, "last", false, "show the latest session")
+	var all bool
+	fs.BoolVar(&all, "all", false, "show records from all sessions")
 	fs.StringVar(&since, "since", "", "show records since a duration or RFC3339 time")
 	help := fs.Bool("help", false, "show help")
 	fs.BoolVar(help, "h", false, "show help")
@@ -64,6 +66,9 @@ func Run(args []string) error {
 	if opts.Last && opts.Session != "" {
 		return clierr.Wrap(clierr.EXUsage, "--last conflicts with --session", nil, "cove help log", nil)
 	}
+	if all && (opts.Last || opts.Session != "") {
+		return clierr.Wrap(clierr.EXUsage, "--all conflicts with --last and --session", nil, "cove help log", nil)
+	}
 	if opts.Blocked {
 		opts.DenyOnly = true
 	}
@@ -79,7 +84,9 @@ func Run(args []string) error {
 	// A selector pins follow. Without one, following remains intentionally
 	// unpinned so sessions that begin after cove log starts are visible.
 	selector := opts.Session
-	if opts.Last || (!opts.Follow && selector == "") {
+	// --all shows every session (no session filter); otherwise a non-follow run
+	// with no explicit selector defaults to the latest session.
+	if !all && (opts.Last || (!opts.Follow && selector == "")) {
 		selector = "last"
 	}
 	if selector != "" {

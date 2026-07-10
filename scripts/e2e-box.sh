@@ -518,8 +518,8 @@ e_pypi_allow_audit() {
 }
 
 e_log_filters() {
-  "$COVE_BIN" log --host pypi.org | grep -F '"host":"pypi.org"' >/dev/null
-  "$COVE_BIN" log --deny-only >"$WORK/deny-only.log"
+  "$COVE_BIN" log --all --host pypi.org | grep -F '"host":"pypi.org"' >/dev/null
+  "$COVE_BIN" log --all --deny-only >"$WORK/deny-only.log"
   grep -F '"policy":"deny"' "$WORK/deny-only.log" >/dev/null
   ! grep -F '"policy":"allow"' "$WORK/deny-only.log" >/dev/null
 }
@@ -536,9 +536,9 @@ m8_log_filters_seeded() {
 {"ts":"2026-07-05T00:00:00Z","session":"ccc33333","policy":"allow","host":"evil.example.com","port":443,"bytes_up":4,"bytes_down":5,"dur_ms":6}
 {"ts":
 JSONL
-  env XDG_STATE_HOME="$state" "$COVE_BIN" log --deny-only >"$WORK/m8-deny-only.log"
+  env XDG_STATE_HOME="$state" "$COVE_BIN" log --all --deny-only >"$WORK/m8-deny-only.log"
   env XDG_STATE_HOME="$state" "$COVE_BIN" log --session aaa11111 >"$WORK/m8-session.log"
-  env XDG_STATE_HOME="$state" "$COVE_BIN" log --host evil.example.com >"$WORK/m8-host.log"
+  env XDG_STATE_HOME="$state" "$COVE_BIN" log --all --host evil.example.com >"$WORK/m8-host.log"
   env XDG_STATE_HOME="$state" "$COVE_BIN" log --deny-only --session aaa11111 --host evil.example.com >"$WORK/m8-composed.log"
   python3 - "$WORK/m8-deny-only.log" "$WORK/m8-session.log" "$WORK/m8-host.log" "$WORK/m8-composed.log" <<'PY'
 import json, sys
