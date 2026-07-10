@@ -19,6 +19,16 @@ type Plan struct {
 	Try        string
 }
 
+// commitManaged applies a complete policy transition in one managed-config
+// replacement.  It is used for multi-host connections (notably GitHub), where
+// observing half a transition would be unsafe.
+func commitManaged(ctx context.Context, mutate func(*config.ManagedConfig) error) error {
+	return config.EditManagedConfig(ctx, func(m *config.ManagedConfig) error {
+		m.Version = 1
+		return mutate(m)
+	})
+}
+
 func compileService(s Service, cfg *config.Config) (Plan, error) {
 	st := s.Stanza
 	st.Secret = "file:" + filepath.Join(config.ConfigDir(), "secrets", s.SecretFile)
@@ -39,8 +49,7 @@ func commitPlan(ctx context.Context, p Plan, secret []byte) error {
 	if err := config.WriteSecretAtomic(p.SecretPath, secret); err != nil {
 		return err
 	}
-	return config.EditManagedConfig(ctx, func(m *config.ManagedConfig) error {
-		m.Version = 1
+	return commitManaged(ctx, func(m *config.ManagedConfig) error {
 		if p.BlockBase {
 			found := false
 			for _, b := range m.Block {

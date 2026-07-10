@@ -144,7 +144,7 @@ var public = map[string]func([]string) error{
 	"status":   status.Run,
 	"add":      connection.Add,
 	"allow":    connection.Allow,
-	"remove":   unavailable,
+	"remove":   connection.Remove,
 	"list":     connection.List,
 	"log":      logcmd.Run,
 	"config":   configcmd.Run,

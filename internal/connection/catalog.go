@@ -18,3 +18,9 @@ var services = map[string]Service{
 	"gemini":      {"gemini", "gemini-api-key", config.InjectStanza{Name: "gemini", Host: "generativelanguage.googleapis.com", HeaderName: "x-goog-api-key", HeaderTemplate: "{secret}", DummyEnv: "GEMINI_API_KEY", DummyValue: "cove-dummy-gemini-ask-the-human-to-run-cove-add-gemini", BaseURLEnv: "GOOGLE_GEMINI_BASE_URL", BaseURLValue: "https://generativelanguage.googleapis.com"}, "try: cove claude"},
 	"huggingface": {"huggingface", "hf-token", config.InjectStanza{Name: "huggingface", Host: "huggingface.co", HeaderName: "Authorization", HeaderTemplate: "Bearer {secret}", DummyEnv: "HF_TOKEN", DummyValue: "cove-dummy-huggingface-ask-the-human-to-run-cove-add-huggingface"}, "try: cove claude"},
 }
+
+func githubPAT(repo []string) (config.InjectStanza, config.InjectStanza) {
+	secret := "file:" + config.ConfigDir() + "/secrets/github-pat"
+	return config.InjectStanza{Name: "github-api", Host: "api.github.com", HeaderName: "Authorization", HeaderTemplate: "Bearer {secret}", Secret: secret, DummyEnv: "GH_TOKEN", DummyValue: "cove-dummy-github-ask-the-human-to-run-cove-add-github"},
+		config.InjectStanza{Name: "github", Host: "github.com", Transform: "github-basic", HeaderName: "Authorization", BasicUsername: "x-access-token", Secret: secret, GitHubRepositories: repo, AllowedMethods: []string{"GET", "POST"}, DummyEnv: "GH_TOKEN", DummyValue: "cove-dummy-github-ask-the-human-to-run-cove-add-github"}
+}

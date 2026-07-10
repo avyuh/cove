@@ -280,3 +280,78 @@ func TestListIsTabSeparatedAndDoesNotResolveSecret(t *testing.T) {
 		t.Fatal("list printed secret reference")
 	}
 }
+
+func TestAddTokenValidatesAndNeverLeaksSecret(t *testing.T) {
+	out, _ := setupAddTest(t)
+	if err := Add([]string{"token", "ci-token", "--host", "token.example", "--header", "Authorization: Bearer {secret}", "--secret-stdin", "--yes"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "synthetic-secret") {
+		t.Fatal("token secret leaked to output")
+	}
+	if _, err := os.Stat(filepath.Join(config.ConfigDir(), "secrets", "token-ci-token")); err != nil {
+		t.Fatal(err)
+	}
+	if err := Add([]string{"token", "BAD", "--host", "token.example", "--secret-stdin", "--yes"}); err == nil {
+		t.Fatal("unsafe slug accepted")
+	}
+	if err := Add([]string{"token", "other", "--host", "api.openai.com", "--secret-stdin", "--yes"}); err == nil {
+		t.Fatal("token took over differently named policy")
+	}
+}
+
+func TestGitHubPATAndOAuthAreSingleSafeTransitions(t *testing.T) {
+	out, path := setupAddTest(t)
+	if err := os.WriteFile(path, []byte("allow = [\"github.com\", \"api.github.com\"]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Add([]string{"github", "--repo", "owner/repo", "--secret-stdin", "--yes"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Inject) != 2 || len(cfg.AllowRules) != 0 {
+		t.Fatalf("PAT transition unsafe: inject=%+v allow=%+v", cfg.Inject, cfg.AllowRules)
+	}
+	if !strings.Contains(out.String(), "undo: cove add github --oauth") {
+		t.Fatalf("missing undo: %q", out.String())
+	}
+	if err := Add([]string{"github", "--oauth", "--yes"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Inject) != 0 || len(cfg.AllowRules) != 2 {
+		t.Fatalf("OAuth reversal wrong: inject=%+v allow=%+v", cfg.Inject, cfg.AllowRules)
+	}
+	if _, err := os.Stat(filepath.Join(config.ConfigDir(), "secrets", "github-pat")); err != nil {
+		t.Fatalf("PAT was deleted: %v", err)
+	}
+}
+
+func TestRemoveBlocksSeedAndRetainsSecret(t *testing.T) {
+	_, path := setupAddTest(t)
+	if err := Add([]string{"openai", "--secret-stdin", "--yes"}); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(config.ConfigDir(), "secrets", "openai-api-key")
+	if err := Remove([]string{"openai", "--yes"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, st := range cfg.Inject {
+		if st.Host == "api.openai.com" {
+			t.Fatal("removed policy fell back to seed")
+		}
+	}
+	if _, err := os.Stat(secret); err != nil {
+		t.Fatalf("remove deleted secret: %v", err)
+	}
+}
