@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("cove\x00-C\x00project\x00claude\x00-p\x00")

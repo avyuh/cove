@@ -175,6 +175,9 @@ func parseTarget(s string) (Target, error) {
 }
 
 func hostPolicyBody(t Target) string {
+	if t.Host != strings.TrimSpace(t.Host) {
+		return "cove blocked HTTPS request.\nAsk the human to run: cove explain last\nThen retry the request.\n"
+	}
 	r, err := config.ParseExactRule(net.JoinHostPort(t.Host, strconv.Itoa(t.Port)))
 	if err != nil {
 		return "cove blocked HTTPS request.\nAsk the human to run: cove explain last\nThen retry the request.\n"

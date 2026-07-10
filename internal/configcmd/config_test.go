@@ -64,3 +64,35 @@ func TestEditInvalidRetainsRecoveryAndOriginal(t *testing.T) {
 		t.Fatalf("recovery mode: %v %v", st, e)
 	}
 }
+
+func TestEditRefusesProtectedHostDowngradeToAllow(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	path := filepath.Join(root, "config", "cove", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte(`[[inject]]
+host = "api.example.com"
+header_name = "Authorization"
+header_template = "Bearer {secret}"
+secret = "env:TOKEN"
+`)
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	old := runEditor
+	runEditor = func(p string) error {
+		return os.WriteFile(p, []byte(`allow = ["api.example.com"]
+`), 0600)
+	}
+	t.Cleanup(func() { runEditor = old })
+	err := Edit()
+	var ce *clierr.Error
+	if !errors.As(err, &ce) || ce.Code != clierr.EXConfig || !strings.Contains(ce.What, "downgrade a protected host") {
+		t.Fatalf("err=%#v, want protected-downgrade EX_CONFIG", err)
+	}
+	if got, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(got, original) {
+		t.Fatalf("downgrade activated: %q, %v", got, readErr)
+	}
+}

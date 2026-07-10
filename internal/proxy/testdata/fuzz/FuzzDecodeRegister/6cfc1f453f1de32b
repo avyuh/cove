@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"sessiOn\":\"0\",\"Agent\":\"0\",\"Audit\":false}")

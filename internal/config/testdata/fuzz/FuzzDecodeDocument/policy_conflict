@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("allow=[\"api.example.com\"]\n[[inject]]\nhost=\"api.example.com\"\nheader_name=\"Authorization\"\nheader_template=\"Bearer {secret}\"\nsecret=\"env:TOKEN\"\n")

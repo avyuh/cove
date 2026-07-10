@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("# user\r\nallow=[\"example.com\"]\r\n# tail\r\n")

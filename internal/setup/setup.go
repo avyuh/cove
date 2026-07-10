@@ -278,7 +278,7 @@ func ensureUserArtifacts(u invokingUser) ([]string, error) {
 
 	configPath := filepath.Join(u.Home, ".config", "cove", "config.toml")
 	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
-		if err := config.CreateIfAbsentAtomic(configPath, []byte(config.DefaultConfig)); err != nil {
+		if err := createSeedConfig(configPath); err != nil {
 			return nil, err
 		}
 		if err := chmodChown(configPath, 0600, u); err != nil {
@@ -291,6 +291,14 @@ func ensureUserArtifacts(u invokingUser) ([]string, error) {
 		return nil, err
 	}
 	return notes, nil
+}
+
+func createSeedConfig(path string) error {
+	candidate := []byte(config.DefaultConfig)
+	if _, err := config.DecodeDocument(path, candidate); err != nil {
+		return err
+	}
+	return config.CreateIfAbsentAtomic(path, candidate)
 }
 
 func chmodChown(path string, mode os.FileMode, u invokingUser) error {

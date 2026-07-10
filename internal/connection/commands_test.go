@@ -92,6 +92,32 @@ func TestAllowRefusesProtectedHost(t *testing.T) {
 	}
 }
 
+func TestAllowRefusesExactDowngradeOfProtectedWildcard(t *testing.T) {
+	policy := []byte(`[[inject]]
+host = "*.example.com"
+header_name = "Authorization"
+header_template = "Bearer {secret}"
+secret = "env:TOKEN"
+`)
+	for _, args := range [][]string{
+		{"--yes", "api.example.com"},
+		{"--yes", "--once", "api.example.com"},
+	} {
+		path, state, _ := setupAllowTest(t, policy)
+		err := Allow(args)
+		got := allowCLIError(t, err)
+		if !strings.Contains(got.What, "already protected by inject policy") {
+			t.Fatalf("Allow(%q) did not refuse wildcard downgrade: %+v", args, got)
+		}
+		if body, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(body, policy) {
+			t.Fatalf("Allow(%q) mutated config: %q, %v", args, body, readErr)
+		}
+		if _, statErr := os.Stat(filepath.Join(state, "cove", "pending-allows.json")); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("Allow(%q) created a pending grant: %v", args, statErr)
+		}
+	}
+}
+
 func TestAllowOnceQueuesWithoutConfigMutation(t *testing.T) {
 	path, state, _ := setupAllowTest(t, []byte("# policy\n"))
 	before, err := os.ReadFile(path)

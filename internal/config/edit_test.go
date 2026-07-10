@@ -57,6 +57,31 @@ func TestManagedCorpusPreservesUserBytes(t *testing.T) {
 	}
 }
 
+func TestManagedMarkersIgnoreTripleQuotesInComments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	original := []byte("value = '' # comment with '''")
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := EditManagedPath(context.Background(), path, addManagedAllow); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rng, err := findManagedRange(first)
+	if err != nil || rng.start < 0 || !bytes.Equal(first[:len(original)], original) {
+		t.Fatalf("appended block was hidden by comment quotes: range=%+v err=%v\n%s", rng, err, first)
+	}
+	if err := EditManagedPath(context.Background(), path, func(m *rawManaged) error {
+		m.Allow = append(m.Allow, NamedAllow{Name: "second", Host: "second.example.com"})
+		return nil
+	}); err != nil {
+		t.Fatalf("second edit could not find managed block: %v", err)
+	}
+}
+
 func TestManagedFailuresAndExternalWriter(t *testing.T) {
 	bad := []string{managedBegin + "\n[managed]\nversion=1\n", managedEnd + "\n", "[managed]\nversion=1\n", managedBegin + "\n[managed]\nversion=99\n" + managedEnd + "\n", managedBegin + "\n[managed]\nversion=1\nunknown=true\n" + managedEnd + "\n"}
 	for _, body := range bad {

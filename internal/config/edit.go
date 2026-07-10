@@ -399,13 +399,11 @@ func findManagedRange(data []byte) (managedRange, error) {
 		// a comment line. This deliberately small lexical guard is all the
 		// managed strategy needs; TOML decoding remains authoritative.
 		if multiline != "" {
-			if strings.Contains(line, multiline) {
+			if closesMultiline(line, multiline) {
 				multiline = ""
 			}
-		} else if strings.Count(line, `"""`)%2 == 1 {
-			multiline = `"""`
-		} else if strings.Count(line, `'''`)%2 == 1 {
-			multiline = `'''`
+		} else {
+			multiline = opensMultiline(line)
 		}
 		off = n + 1
 	}
@@ -416,6 +414,66 @@ func findManagedRange(data []byte) (managedRange, error) {
 		return managedRange{start: -1, end: -1}, nil
 	}
 	return managedRange{start: begin, end: end}, nil
+}
+
+// opensMultiline recognizes triple-quoted strings only in TOML code. A marker
+// scanner must not let quote-looking text in comments or ordinary strings hide
+// a managed block appended later in the file.
+func opensMultiline(line string) string {
+	var quote byte
+	escaped := false
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if quote != 0 {
+			if quote == '"' && escaped {
+				escaped = false
+				continue
+			}
+			if quote == '"' && ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if ch == '#' {
+			return ""
+		}
+		if i+3 <= len(line) && (line[i:i+3] == `"""` || line[i:i+3] == `'''`) {
+			delim := line[i : i+3]
+			if closesMultiline(line[i+3:], delim) {
+				return ""
+			}
+			return delim
+		}
+		if ch == '\'' || ch == '"' {
+			quote = ch
+		}
+	}
+	return ""
+}
+
+func closesMultiline(line, delim string) bool {
+	for start := 0; ; {
+		i := strings.Index(line[start:], delim)
+		if i < 0 {
+			return false
+		}
+		i += start
+		if delim == `'''` {
+			return true
+		}
+		backslashes := 0
+		for j := i - 1; j >= 0 && line[j] == '\\'; j-- {
+			backslashes++
+		}
+		if backslashes%2 == 0 {
+			return true
+		}
+		start = i + len(delim)
+	}
 }
 
 func hasManagedTableOutside(data []byte) bool {

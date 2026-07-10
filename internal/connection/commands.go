@@ -710,6 +710,17 @@ func Allow(args []string) error {
 	if owner := protectedOwner(cfg, rule); owner != "" {
 		return clierr.Wrap(clierr.EXUsage, "cannot allow "+canonical+" because it is already protected by "+owner, nil, "cove list; then cove config edit", nil)
 	}
+	// Validate the full effective candidate even for --once. The pending queue
+	// is not TOML, but its session matcher overlay is still a policy mutation and
+	// must pass the same one-policy boundary as a persistent managed allow.
+	candidate := *cfg
+	candidate.Allow = append([]string(nil), cfg.Allow...)
+	if !hasAllow(cfg, rule) {
+		candidate.Allow = append(candidate.Allow, canonical)
+	}
+	if err := candidate.Validate(); err != nil {
+		return clierr.Wrap(clierr.EXConfig, "allow would make the policy invalid", nil, "cove config check", err)
+	}
 
 	scope := "current and future sessions"
 	if *once {
@@ -760,21 +771,40 @@ func hasAllow(cfg *config.Config, rule config.AllowRule) bool {
 
 func protectedOwner(cfg *config.Config, rule config.AllowRule) string {
 	for _, st := range cfg.Inject {
-		if r, err := config.ParseRule(st.Host); err == nil && sameRule(r, rule) {
+		if r, err := config.ParseRule(st.Host); err == nil && protectedRuleCovers(r, rule) {
 			return "inject policy"
 		}
 	}
 	for _, st := range cfg.SigV4 {
-		if r, err := config.ParseRule(st.Host); err == nil && sameRule(r, rule) {
+		if r, err := config.ParseRule(st.Host); err == nil && protectedRuleCovers(r, rule) {
 			return "sigv4 policy"
 		}
 	}
 	for _, st := range cfg.MTLS {
-		if r, err := config.ParseRule(st.Host); err == nil && sameRule(r, rule) {
+		if r, err := config.ParseRule(st.Host); err == nil && protectedRuleCovers(r, rule) {
 			return "mtls policy"
 		}
 	}
 	return ""
+}
+
+// protectedRuleCovers reports whether adding the exact candidate allow would
+// select opaque tunnelling for a destination already covered by a protected
+// policy. Exact rules win over wildcards in the matcher, so an exact allow
+// beneath a protected wildcard is a downgrade even though the rule keys differ.
+func protectedRuleCovers(protected, candidate config.AllowRule) bool {
+	if protected.Port != candidate.Port || candidate.Wildcard {
+		return false
+	}
+	if !protected.Wildcard {
+		return protected.Host == candidate.Host
+	}
+	suffix := "." + protected.Host
+	if !strings.HasSuffix(candidate.Host, suffix) {
+		return false
+	}
+	left := strings.TrimSuffix(candidate.Host, suffix)
+	return left != "" && !strings.Contains(left, ".")
 }
 
 // reloadProxy asks the already-running per-user daemon to atomically load the

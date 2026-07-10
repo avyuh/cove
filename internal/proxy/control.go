@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"sync"
+	"unicode/utf8"
 
 	"cove/internal/config"
 )
@@ -49,6 +50,24 @@ type controlEnd struct {
 
 func decodeRegister(line string) (RegisterRequest, error) {
 	var r RegisterRequest
+	if len(line) > controlLineLimit || !utf8.ValidString(line) {
+		return r, fmt.Errorf("invalid REGISTER/2")
+	}
+	var keys map[string]json.RawMessage
+	keyDecoder := json.NewDecoder(&stringReader{s: line})
+	if err := keyDecoder.Decode(&keys); err != nil {
+		return r, err
+	}
+	var keyExtra any
+	if err := keyDecoder.Decode(&keyExtra); err != io.EOF {
+		return r, fmt.Errorf("multiple JSON values")
+	}
+	known := map[string]bool{"session": true, "agent": true, "audit": true, "project": true, "diagnostic": true}
+	for key := range keys {
+		if !known[key] {
+			return r, fmt.Errorf("unknown REGISTER/2 key %q", key)
+		}
+	}
 	d := json.NewDecoder(io.LimitReader(&stringReader{s: line}, controlLineLimit))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&r); err != nil {

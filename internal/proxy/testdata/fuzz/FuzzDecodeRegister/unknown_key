@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"session\":\"deadbeef\",\"agent\":\"agent\",\"audit\":true,\"extra\":1}")

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"testing"
 
+	"cove/internal/config"
 	"cove/internal/proxy"
 )
 
@@ -33,6 +34,19 @@ func TestEnsureUserArtifactsIdempotentAndModes(t *testing.T) {
 	assertModeAndOwner(t, filepath.Join(home, ".config", "cove", "ca.pem"), 0644, u)
 	assertModeAndOwner(t, filepath.Join(home, ".config", "cove", "ca-key.pem"), 0600, u)
 	assertModeAndOwner(t, filepath.Join(home, ".config", "cove", "config.toml"), 0600, u)
+}
+
+func TestCreateSeedConfigValidatesCandidateBeforeWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cove", "config.toml")
+	original := config.DefaultConfig
+	config.DefaultConfig = `allow = ["*"]`
+	t.Cleanup(func() { config.DefaultConfig = original })
+	if err := createSeedConfig(path); err == nil {
+		t.Fatal("invalid embedded seed was written")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("invalid seed destination exists: %v", err)
+	}
 }
 
 func TestGenerateCAProperties(t *testing.T) {

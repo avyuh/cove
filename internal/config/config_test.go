@@ -198,6 +198,20 @@ func TestParseRuleIPLiteralAndHostPort(t *testing.T) {
 	}
 }
 
+func TestFormatExactRuleDefaultPortIPv6RoundTrips(t *testing.T) {
+	rule, err := ParseExactRule("[2001:db8::1]:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := FormatExactRule(rule); got != "[2001:db8::1]" {
+		t.Fatalf("FormatExactRule = %q, want bracketed IPv6", got)
+	}
+	roundTrip, err := ParseExactRule(FormatExactRule(rule))
+	if err != nil || roundTrip.Host != rule.Host || roundTrip.Port != rule.Port {
+		t.Fatalf("round trip = %+v, %v; want %+v", roundTrip, err, rule)
+	}
+}
+
 func TestMissingSecretFileInjectStanzaIsInertAtConfigLoad(t *testing.T) {
 	cfg, err := LoadBytes([]byte(`
 [[inject]]

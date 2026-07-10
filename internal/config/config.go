@@ -778,6 +778,9 @@ func FormatExactRule(r AllowRule) string {
 	if r.Port != 443 {
 		return net.JoinHostPort(host, strconv.Itoa(r.Port))
 	}
+	if ip := net.ParseIP(host); ip != nil && strings.Contains(host, ":") {
+		return "[" + host + "]"
+	}
 	return host
 }
 
@@ -805,6 +808,13 @@ func splitHostPortDefault(raw string) (string, int, error) {
 	host := raw
 	port := 443
 	if strings.HasPrefix(raw, "[") {
+		if strings.HasSuffix(raw, "]") {
+			host = strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]")
+			if net.ParseIP(host) == nil || !strings.Contains(host, ":") {
+				return "", 0, errors.New("invalid bracketed IPv6 host")
+			}
+			return host, port, nil
+		}
 		h, p, err := net.SplitHostPort(raw)
 		if err != nil {
 			return "", 0, err

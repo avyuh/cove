@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("# BEGIN COVE MANAGED — written by cove commands\n[managed]\nversion=1\nunknown=true\n# END COVE MANAGED\n")

@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("cove\x00--\x00-agent\x00\x00--literal")

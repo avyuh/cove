@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"cove/internal/clierr"
@@ -78,8 +79,16 @@ func Edit() error {
 		os.Remove(tmpName)
 		return clierr.Wrap(clierr.EXUsage, "editor did not complete", nil, "cove config edit", err)
 	}
-	if _, err := config.LoadDocument(tmpName); err != nil {
+	edited, err := config.LoadDocument(tmpName)
+	if err != nil {
 		return clierr.Wrap(clierr.EXConfig, "edited configuration is invalid; recovery copy retained at "+tmpName, nil, "fix the recovery copy, then cove config edit", err)
+	}
+	originalDoc, err := config.DecodeDocument(path, original)
+	if err != nil {
+		return err
+	}
+	if err := rejectProtectedDowngrade(originalDoc.Config, edited.Config); err != nil {
+		return clierr.Wrap(clierr.EXConfig, "edited configuration would downgrade a protected host; recovery copy retained at "+tmpName, nil, "keep the protected policy, or use its explicit connection command", err)
 	}
 	lock, err := os.OpenFile(filepath.Join(dir, "config.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
@@ -115,6 +124,58 @@ func Edit() error {
 	}
 	fmt.Fprintln(output, "saved: config")
 	return nil
+}
+
+func rejectProtectedDowngrade(before, after *config.Config) error {
+	var protected []config.AllowRule
+	for _, host := range protectedHosts(before) {
+		rule, err := config.ParseRule(host)
+		if err != nil {
+			return err
+		}
+		protected = append(protected, rule)
+	}
+	for _, allow := range after.AllowRules {
+		for _, rule := range protected {
+			if policyRulesOverlap(rule, allow) {
+				return fmt.Errorf("%s changes from protected to opaque allow", allow.Pattern)
+			}
+		}
+	}
+	return nil
+}
+
+func protectedHosts(cfg *config.Config) []string {
+	hosts := make([]string, 0, len(cfg.Inject)+len(cfg.SigV4)+len(cfg.MTLS))
+	for _, stanza := range cfg.Inject {
+		hosts = append(hosts, stanza.Host)
+	}
+	for _, stanza := range cfg.SigV4 {
+		hosts = append(hosts, stanza.Host)
+	}
+	for _, stanza := range cfg.MTLS {
+		hosts = append(hosts, stanza.Host)
+	}
+	return hosts
+}
+
+func policyRulesOverlap(a, b config.AllowRule) bool {
+	if a.Port != b.Port {
+		return false
+	}
+	if !a.Wildcard && !b.Wildcard {
+		return a.Host == b.Host
+	}
+	if a.Wildcard && b.Wildcard {
+		return a.Host == b.Host
+	}
+	wild, exact := a, b
+	if !wild.Wildcard {
+		wild, exact = b, a
+	}
+	suffix := "." + wild.Host
+	left := strings.TrimSuffix(exact.Host, suffix)
+	return strings.HasSuffix(exact.Host, suffix) && left != "" && !strings.Contains(left, ".")
 }
 
 func defaultEditor(path string) error {
