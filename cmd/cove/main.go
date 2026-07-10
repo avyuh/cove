@@ -11,10 +11,12 @@ import (
 	"cove/internal/config"
 	"cove/internal/configcmd"
 	"cove/internal/connection"
+	"cove/internal/explain"
 	"cove/internal/help"
 	"cove/internal/launcher"
 	"cove/internal/logcmd"
 	"cove/internal/proxy"
+	"cove/internal/sessioncmd"
 	"cove/internal/setup"
 	"cove/internal/status"
 	"cove/internal/version"
@@ -147,8 +149,8 @@ var public = map[string]func([]string) error{
 	"list":     connection.List,
 	"log":      logcmd.Run,
 	"config":   configcmd.Run,
-	"sessions": unavailable,
-	"explain":  unavailable,
+	"sessions": sessioncmd.Run,
+	"explain":  explain.Run,
 	"help":     help.Run,
 }
 

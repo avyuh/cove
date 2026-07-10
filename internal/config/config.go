@@ -379,7 +379,7 @@ func validateInjectStanza(st *InjectStanza, r AllowRule) error {
 		st.Transform = "template"
 	}
 	if st.DummyValue == "" {
-		st.DummyValue = "cove-dummy-do-not-use"
+		st.DummyValue = "cove-dummy-ask-the-human-to-run-cove-add"
 	}
 	if st.ALPN == "" {
 		st.ALPN = "h2"

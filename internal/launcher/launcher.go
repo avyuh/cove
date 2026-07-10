@@ -66,8 +66,8 @@ var (
 
 var sigV4DummyEnv = map[string]string{
 	"AWS_ACCESS_KEY_ID":         "COVE0000000000000000",
-	"AWS_SECRET_ACCESS_KEY":     "cove-dummy-secret-access-key-do-not-use",
-	"AWS_SESSION_TOKEN":         "cove-dummy-session-token-do-not-use",
+	"AWS_SECRET_ACCESS_KEY":     "cove-dummy-aws-ask-the-human-to-run-cove-add-s3",
+	"AWS_SESSION_TOKEN":         "cove-dummy-aws-ask-the-human-to-run-cove-add-s3",
 	"AWS_EC2_METADATA_DISABLED": "true",
 }
 

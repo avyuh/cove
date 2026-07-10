@@ -57,6 +57,7 @@ header_template = "Bearer {secret}"
 secret        = "json:~/.claude/.credentials.json#claudeAiOauth.accessToken"
 mode          = "oauth-refresh"
 dummy_env     = "ANTHROPIC_API_KEY"
+dummy_value   = "cove-dummy-claude-ask-the-human-to-login-with-claude-on-the-host"
 strip_headers = ["x-api-key"]
 base_url_env  = "ANTHROPIC_BASE_URL"
 base_url_value = "https://api.anthropic.com"

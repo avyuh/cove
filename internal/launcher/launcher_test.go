@@ -398,8 +398,8 @@ func TestBuildDirectivesAddsSigV4Dummies(t *testing.T) {
 			}
 			for key, want := range map[string]string{
 				"AWS_ACCESS_KEY_ID":         "COVE0000000000000000",
-				"AWS_SECRET_ACCESS_KEY":     "cove-dummy-secret-access-key-do-not-use",
-				"AWS_SESSION_TOKEN":         "cove-dummy-session-token-do-not-use",
+				"AWS_SECRET_ACCESS_KEY":     "cove-dummy-aws-ask-the-human-to-run-cove-add-s3",
+				"AWS_SESSION_TOKEN":         "cove-dummy-aws-ask-the-human-to-run-cove-add-s3",
 				"AWS_EC2_METADATA_DISABLED": "true",
 			} {
 				if got := d.DummyEnv[key]; got != want {
@@ -416,6 +416,33 @@ func TestBuildDirectivesAddsSigV4Dummies(t *testing.T) {
 				t.Fatalf("AWS_DEFAULT_REGION should be omitted for conflicting regions: %+v", d.DummyEnv)
 			}
 		})
+	}
+}
+
+func TestBuildPlanDummyHintsNeverUseHostSecret(t *testing.T) {
+	t.Setenv("REAL_HOST_SECRET", "real-host-secret-must-not-cross")
+	cfg, err := config.LoadBytes([]byte(`
+[[inject]]
+host = "api.example.com"
+header_name = "Authorization"
+header_template = "Bearer {secret}"
+secret = "env:REAL_HOST_SECRET"
+dummy_env = "EXAMPLE_API_KEY"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := BuildPlan(cfg, Opts{Project: t.TempDir(), AgentArgv: []string{"/bin/true"}, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Directives.DummyEnv["EXAMPLE_API_KEY"]; got != "cove-dummy-ask-the-human-to-run-cove-add" {
+		t.Fatalf("dummy = %q", got)
+	}
+	for _, value := range p.Directives.DummyEnv {
+		if value == "real-host-secret-must-not-cross" {
+			t.Fatal("real host secret reached box dummy environment")
+		}
 	}
 }
 
