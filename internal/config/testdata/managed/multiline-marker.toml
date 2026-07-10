@@ -1,0 +1,5 @@
+note = """
+# BEGIN COVE MANAGED — written by cove commands
+not a marker
+"""
+allow = ["user.example.com"]

@@ -1,0 +1,2 @@
+# no final newline
+allow = ["user.example.com"]

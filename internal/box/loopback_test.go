@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -277,7 +278,7 @@ func registerProxySession(t *testing.T, controlSock string) (net.Conn, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := io.WriteString(c, "REGISTER abc12345 kimi\n"); err != nil {
+	if _, err := io.WriteString(c, "REGISTER/2 {\"session\":\"abc12345\",\"agent\":\"kimi\",\"audit\":true}\n"); err != nil {
 		_ = c.Close()
 		t.Fatal(err)
 	}
@@ -287,11 +288,18 @@ func registerProxySession(t *testing.T, controlSock string) (net.Conn, string) {
 		t.Fatal(err)
 	}
 	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "OK ") {
+	if !strings.HasPrefix(line, "OK/2 ") {
 		_ = c.Close()
 		t.Fatalf("REGISTER response = %q", line)
 	}
-	return c, strings.TrimSpace(strings.TrimPrefix(line, "OK "))
+	var ok struct {
+		Socket string `json:"socket"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "OK/2 ")), &ok); err != nil || ok.Socket == "" {
+		_ = c.Close()
+		t.Fatalf("REGISTER response = %q, err=%v", line, err)
+	}
+	return c, ok.Socket
 }
 
 func mustServerPort(t *testing.T, rawURL string) int {

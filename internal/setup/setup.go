@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"cove/internal/clierr"
 	"cove/internal/config"
 )
 
@@ -35,6 +36,11 @@ func (e setupError) Error() string {
 
 func (e setupError) ExitCode() int {
 	return e.code
+}
+
+// CLIError is the temporary adapter for setup's legacy error carrier.
+func (e setupError) CLIError() *clierr.Error {
+	return clierr.Wrap(e.code, e.msg, nil, "cove setup", e)
 }
 
 type invokingUser struct {
@@ -101,7 +107,7 @@ func Run(args []string) error {
 	configPath := filepath.Join(u.Home, ".config", "cove", "config.toml")
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		return setupError{code: 78, msg: fmt.Sprintf("seed config did not validate: %v", err)}
+		return err
 	}
 
 	for _, note := range notes {
@@ -254,6 +260,7 @@ func ensureUserArtifacts(u invokingUser) ([]string, error) {
 		{filepath.Join(u.Home, ".config", "cove", "secrets"), 0700},
 		{filepath.Join(u.Home, ".local", "state", "cove"), 0700},
 		{filepath.Join(u.Home, ".local", "state", "cove", "sessions"), 0700},
+		{filepath.Join(u.Home, ".local", "state", "cove", "sessions", "meta"), 0700},
 	}
 	for _, d := range dirs {
 		if _, err := os.Stat(d.path); errors.Is(err, os.ErrNotExist) {

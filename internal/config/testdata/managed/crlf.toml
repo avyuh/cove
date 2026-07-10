@@ -1,0 +1,7 @@
+# CRLF corpus fixture
+allow = ["user.example.com"]
+# BEGIN COVE MANAGED — written by cove commands
+[managed]
+version = 1
+# END COVE MANAGED
+# trailing comment

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"cove/internal/config"
 	"cove/internal/secret"
 )
 
@@ -73,7 +74,7 @@ func (c *Conn) handle() {
 	}
 	policy, inject := c.matcher.Match(t.Host, t.Port)
 	if policy == PolicyDeny {
-		c.deny(t, 403, "denied by cove policy\n")
+		c.denyHostPolicy(t)
 		return
 	}
 	if policy == PolicyInject {
@@ -126,7 +127,25 @@ func parseTarget(s string) (Target, error) {
 	if err != nil || port <= 0 || port > 65535 {
 		return Target{}, fmt.Errorf("bad port")
 	}
-	return Target{Host: strings.ToLower(strings.Trim(host, "[]")), Port: port}, nil
+	r, err := config.ParseExactRule(net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		return Target{}, err
+	}
+	return Target{Host: r.Host, Port: r.Port}, nil
+}
+
+func hostPolicyBody(t Target) string {
+	r, err := config.ParseExactRule(net.JoinHostPort(t.Host, strconv.Itoa(t.Port)))
+	if err != nil {
+		return "cove blocked HTTPS request.\nAsk the human to run: cove explain last\nThen retry the request.\n"
+	}
+	host := config.FormatExactRule(r)
+	return "cove blocked HTTPS to " + host + ".\nAsk the human to run: cove allow " + host + "\nThen retry the request."
+}
+
+func (c *Conn) denyHostPolicy(t Target) {
+	c.writeResponse(http.StatusForbidden, "Forbidden", hostPolicyBody(t))
+	c.auditDenyReason(t, http.StatusForbidden, "host_policy")
 }
 
 func (c *Conn) tunnel(t Target, policy Policy) error {
@@ -236,6 +255,10 @@ func (c *Conn) writeResponse(status int, text, body string) {
 }
 
 func (c *Conn) auditDeny(t Target, status int) {
+	c.auditDenyReason(t, status, "")
+}
+
+func (c *Conn) auditDenyReason(t Target, status int, reason string) {
 	c.emit(&AuditRecord{
 		TS:      time.Now().UTC(),
 		Session: c.sess.ID,
@@ -245,12 +268,18 @@ func (c *Conn) auditDeny(t Target, status int) {
 		Method:  "-",
 		Path:    "-",
 		Status:  status,
+		Reason:  reason,
 		Agent:   c.sess.Agent,
 	})
 }
 
 func (c *Conn) emit(rec *AuditRecord) {
-	if c.audit != nil {
+	if rec.Policy == "deny" && c.sess.Events != nil {
+		c.sess.Events.RecordDeny(rec)
+	}
+	// A nil event sink only occurs in legacy unit construction. Real sessions
+	// always have one and therefore honor their explicit audit bit.
+	if c.audit != nil && (c.sess.Audit || c.sess.Events == nil) {
 		c.audit.Emit(rec)
 	}
 }

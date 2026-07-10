@@ -1,0 +1,3 @@
+{"ts":"2026-07-05T14:03:22.145Z","session":"1a2b3c4d","policy":"deny","host":"evil.example.com","port":443,"method":"-","path":"-","status":403,"bytes_up":12,"bytes_down":34,"dur_ms":56,"agent":"agent"}
+{"ts":"2026-07-05T14:03:23Z","session":"1a2b3c4d","policy":"inject","host":"api.anthropic.com","port":443,"method":"POST","path":"/v1/messages","status":200,"bytes_up":9,"bytes_down":42,"dur_ms":7,"agent":"claude","auth_mode":"oauth-refresh"}
+{"ts":"2026-07-05T14:03:24Z","session":"9f8e7d6c","policy":"allow","host":"pypi.org","port":443,"bytes_up":1,"bytes_down":2,"dur_ms":3,"agent":"pip"}

@@ -29,8 +29,12 @@ const (
 )
 
 type Session struct {
-	ID    string
-	Agent string
+	ID         string
+	Agent      string
+	Audit      bool
+	Events     *SessionEvents
+	Matcher    *Matcher
+	Diagnostic bool
 }
 
 type Proxyd struct {
@@ -49,6 +53,9 @@ type Proxyd struct {
 
 	warnMu        sync.Mutex
 	warnedRelogin map[[32]byte]struct{}
+	// claimAllows is the card-8 queue seam. It is intentionally a no-op until
+	// that queue exists; diagnostic sessions must never consume claims.
+	claimAllows func(Session) []config.AllowRule
 }
 
 type lookupIPFunc func(context.Context, string) ([]net.IPAddr, error)
@@ -59,7 +66,7 @@ func Serve(cfg *config.Config, sockPath string) error {
 	if sockPath == "" {
 		sockPath = filepath.Join(state, "proxyd.sock")
 	}
-	if err := os.MkdirAll(filepath.Join(state, "sessions"), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(state, "sessions", "meta"), 0700); err != nil {
 		return err
 	}
 	lock, held, err := acquireProxydLock(state)
@@ -73,6 +80,10 @@ func Serve(cfg *config.Config, sockPath string) error {
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	_ = os.Remove(sockPath)
 	sessions := filepath.Join(state, "sessions")
+	// Session sockets live directly under sessions/ to keep the AF_UNIX path
+	// short (sun_path is limited to ~108 bytes; a deeper sockets/ subdir
+	// overflows it on long HOME/temp paths). Metadata gets its own sessions/meta/
+	// namespace instead. Sweep here removes stale sockets from older daemons.
 	if err := sweepSessionSockets(sessions); err != nil {
 		return err
 	}
@@ -101,6 +112,14 @@ func Serve(cfg *config.Config, sockPath string) error {
 		sessDir:  sessions,
 		log:      os.Stderr,
 		now:      proxyNow,
+	}
+	p.claimAllows = func(Session) []config.AllowRule {
+		claimed, err := ClaimPendingAllows(p.stateDir, p.now())
+		if err != nil {
+			fmt.Fprintf(p.log, "cove proxyd: pending allows: %v\n", err)
+			return nil
+		}
+		return claimed
 	}
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
@@ -147,28 +166,67 @@ func (p *Proxyd) handleControl(c net.Conn) {
 		fmt.Fprintf(c, "PONG %s\n", version.Version)
 		return
 	}
-	if strings.HasPrefix(line, "REGISTER ") {
-		_ = p.reload()
-		parts := strings.Fields(line)
-		if len(parts) < 3 {
-			fmt.Fprintln(c, "ERR malformed REGISTER")
+	if line == "RELOAD/2" {
+		if err := p.reload(); err != nil {
+			fmt.Fprintln(c, "ERR/2 reload failed")
 			return
 		}
-		p.register(c, Session{ID: parts[1], Agent: parts[2]})
+		fmt.Fprintln(c, "OK/2 reload")
 		return
 	}
-	fmt.Fprintln(c, "ERR unknown command")
+	if strings.HasPrefix(line, "REGISTER/2 ") {
+		if len(line) > controlLineLimit {
+			fmt.Fprintln(c, "ERR/2 control line too long")
+			return
+		}
+		r, err := decodeRegister(strings.TrimPrefix(line, "REGISTER/2 "))
+		if err != nil {
+			fmt.Fprintln(c, "ERR/2 malformed REGISTER/2")
+			return
+		}
+		_ = p.reload()
+		sess := Session{ID: r.Session, Agent: r.Agent, Audit: *r.Audit, Events: NewSessionEvents(), Diagnostic: r.Project == "diagnostic"}
+		p.register(c, sess)
+		return
+	}
+	fmt.Fprintln(c, "ERR/2 unknown command")
 }
 
 func (p *Proxyd) register(control net.Conn, sess Session) {
+	if sess.Events == nil {
+		sess.Events = NewSessionEvents()
+	}
+	if sess.Matcher == nil {
+		p.mu.RLock()
+		sess.Matcher = p.matcher
+		p.mu.RUnlock()
+	}
 	path := filepath.Join(p.sessDir, sess.ID+".sock")
+	if unixSocketAccepts(path) {
+		fmt.Fprintln(control, "ERR/2 session socket already live")
+		return
+	}
 	_ = os.Remove(path)
 	ln, err := net.Listen("unix", path)
 	if err != nil {
-		fmt.Fprintf(control, "ERR %v\n", err)
+		fmt.Fprintf(control, "ERR/2 %v\n", err)
 		return
 	}
 	_ = os.Chmod(path, 0600)
+	// A client cannot reach the session listener until it receives OK/2.  Claim
+	// after that acknowledgement, which keeps failed registration from
+	// consuming a one-shot grant.
+	if _, err := fmt.Fprint(control, controlJSON("OK/2", controlOK{Socket: path, Session: sess.ID})); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(path)
+		return
+	}
+	if p.claimAllows != nil && !sess.Diagnostic {
+		sess.Matcher = sess.Matcher.WithAllows(p.claimAllows(sess))
+	}
+	var handlers sync.WaitGroup
+	var rawMu sync.Mutex
+	raws := map[net.Conn]struct{}{}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -177,8 +235,10 @@ func (p *Proxyd) register(control net.Conn, sess Session) {
 			if err != nil {
 				return
 			}
+			rawMu.Lock()
+			raws[c] = struct{}{}
+			rawMu.Unlock()
 			p.mu.RLock()
-			matcher := p.matcher
 			audit := p.audit
 			ca := p.ca
 			secrets := p.secrets
@@ -188,18 +248,42 @@ func (p *Proxyd) register(control net.Conn, sess Session) {
 				br:      bufio.NewReader(c),
 				sess:    sess,
 				proxy:   p,
-				matcher: matcher,
+				matcher: sess.Matcher,
 				ca:      ca,
 				secrets: secrets,
 				audit:   audit,
 				started: timeNow(),
 			}
-			go conn.handle()
+			handlers.Add(1)
+			go func() {
+				defer handlers.Done()
+				defer func() { rawMu.Lock(); delete(raws, c); rawMu.Unlock() }()
+				conn.handle()
+			}()
 		}
 	}()
-	fmt.Fprintf(control, "OK %s\n", path)
-	_, _ = io.Copy(io.Discard, control)
+	// This goroutine is the sole writer after registration. Event streaming is
+	// intentionally decoupled from proxy request handlers.
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for e := range sess.Events.ch {
+			fmt.Fprint(control, controlJSON("EVENT/2", e.event))
+		}
+		if end := sess.Events.endMessage(); end != nil {
+			fmt.Fprint(control, controlJSON("END/2", *end))
+		}
+	}()
+	br := bufio.NewReader(control)
+	line, err := br.ReadString('\n')
+	clean := err == nil && strings.TrimSpace(line) == "DONE/2"
 	_ = ln.Close()
+	rawMu.Lock()
+	closeRaw(raws)
+	rawMu.Unlock()
+	handlers.Wait()
+	sess.Events.close(clean)
+	<-writerDone
 	<-done
 	_ = os.Remove(path)
 }

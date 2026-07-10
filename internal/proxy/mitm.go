@@ -183,7 +183,7 @@ func (c *Conn) serveMITM(raw net.Conn, br *bufio.Reader, t Target, alpn string, 
 				rec := c.newInjectRecord(t, nil, bytesUp.Load(), state)
 				rec.Policy, rec.Status, rec.Reason, rec.AuthMode = "deny", status, pe.Reason, pe.AuthMode
 				state.emit(c, rec)
-				http.Error(w, "cove: request denied\n", status)
+				http.Error(w, "cove blocked this operation for "+t.Host+"; ask the human to run: cove explain last\n", status)
 				return
 			}
 			rec := c.newInjectRecord(t, nil, bytesUp.Load(), state)

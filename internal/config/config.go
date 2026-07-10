@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/BurntSushi/toml"
 )
 
 type Config struct {
@@ -20,6 +18,7 @@ type Config struct {
 	Inject  []InjectStanza `toml:"inject"`
 	SigV4   []SigV4Stanza  `toml:"sigv4"`
 	MTLS    []MTLSStanza   `toml:"mtls"`
+	Managed ManagedConfig  `toml:"managed"`
 
 	AllowRules []AllowRule `toml:"-"`
 }
@@ -34,6 +33,7 @@ type Options struct {
 }
 
 type InjectStanza struct {
+	Name               string   `toml:"name"`
 	Host               string   `toml:"host"`
 	HeaderName         string   `toml:"header_name"`
 	HeaderTemplate     string   `toml:"header_template"`
@@ -57,6 +57,7 @@ type InjectStanza struct {
 }
 
 type SigV4Stanza struct {
+	Name              string   `toml:"name"`
 	Host              string   `toml:"host"`
 	AccessKeyID       string   `toml:"access_key_id"`
 	SecretAccessKey   string   `toml:"secret_access_key"`
@@ -77,16 +78,25 @@ type SigV4Stanza struct {
 }
 
 type MTLSStanza struct {
-	Host            string   `toml:"host"`
-	ClientCert      string   `toml:"client_cert"`
-	ClientKey       string   `toml:"client_key"`
-	AllowedMethods  []string `toml:"allowed_methods"`
-	AllowedPrefixes []string `toml:"allowed_path_prefixes"`
-	ALPN            string   `toml:"alpn"`
-	Issuer          string   `toml:"issuer"`
-	MaxTTL          string   `toml:"max_ttl"`
-	BootstrapRef    string   `toml:"bootstrap_ref"`
-	Port            int      `toml:"-"`
+	Name                  string     `toml:"name"`
+	Host                  string     `toml:"host"`
+	ClientCert            string     `toml:"client_cert"`
+	ClientKey             string     `toml:"client_key"`
+	Rules                 []MTLSRule `toml:"rules"`
+	LegacyAllowedMethods  []string   `toml:"allowed_methods"`
+	LegacyAllowedPrefixes []string   `toml:"allowed_path_prefixes"`
+	ALPN                  string     `toml:"alpn"`
+	Issuer                string     `toml:"issuer"`
+	MaxTTL                string     `toml:"max_ttl"`
+	BootstrapRef          string     `toml:"bootstrap_ref"`
+	Port                  int        `toml:"-"`
+}
+
+// MTLSRule is one exact HTTP method and path-prefix authorization pair.
+// Pairing is deliberate: independent method and prefix lists over-grant.
+type MTLSRule struct {
+	Method     string `toml:"method"`
+	PathPrefix string `toml:"path_prefix"`
 }
 
 type AllowRule struct {
@@ -102,6 +112,37 @@ type rawConfig struct {
 	Inject  []InjectStanza `toml:"inject"`
 	SigV4   []SigV4Stanza  `toml:"sigv4"`
 	MTLS    []MTLSStanza   `toml:"mtls"`
+	Managed rawManaged     `toml:"managed"`
+}
+
+// ManagedConfig is the cove-owned portion of the configuration. It is kept
+// separate from user-authored policies so edits never need to reformat them.
+type ManagedConfig struct {
+	Version int
+	Allow   []NamedAllow
+	Block   []PolicyRef
+	Inject  []InjectStanza
+	SigV4   []SigV4Stanza
+	MTLS    []MTLSStanza
+}
+
+type rawManaged struct {
+	Version int            `toml:"version"`
+	Allow   []NamedAllow   `toml:"allow"`
+	Block   []PolicyRef    `toml:"block"`
+	Inject  []InjectStanza `toml:"inject"`
+	SigV4   []SigV4Stanza  `toml:"sigv4"`
+	MTLS    []MTLSStanza   `toml:"mtls"`
+}
+
+type NamedAllow struct {
+	Name string `toml:"name"`
+	Host string `toml:"host"`
+}
+
+type PolicyRef struct {
+	Kind string `toml:"kind"`
+	Host string `toml:"host"`
 }
 
 type rawOptions struct {
@@ -110,6 +151,15 @@ type rawOptions struct {
 }
 
 func Load(path string) (*Config, error) {
+	doc, err := LoadDocument(path)
+	if err != nil {
+		return nil, err
+	}
+	return doc.Config, nil
+}
+
+// LoadDocument reads the configured policy while retaining its source context.
+func LoadDocument(path string) (*Document, error) {
 	if path == "" {
 		path = DefaultPath()
 	}
@@ -121,34 +171,16 @@ func Load(path string) (*Config, error) {
 			return nil, err
 		}
 	}
-	return LoadBytes(data)
+	return DecodeDocument(path, data)
 }
 
+// LoadBytes remains for in-memory callers; use DecodeDocument when a path is known.
 func LoadBytes(data []byte) (*Config, error) {
-	raw := rawConfig{
-		Options: rawOptions{Options: Options{
-			TmpSize:   "256m",
-			ProxyPort: 8080,
-			Audit:     true,
-		}},
-	}
-	if _, err := toml.Decode(string(data), &raw); err != nil {
+	doc, err := DecodeDocument("", data)
+	if err != nil {
 		return nil, err
 	}
-	cfg := &Config{
-		Options: raw.Options.Options,
-		Allow:   raw.Allow,
-		Inject:  raw.Inject,
-		SigV4:   raw.SigV4,
-		MTLS:    raw.MTLS,
-	}
-	if len(cfg.Allow) == 0 && len(raw.Options.Allow) > 0 {
-		cfg.Allow = raw.Options.Allow
-	}
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
-	return cfg, nil
+	return doc.Config, nil
 }
 
 func DefaultPath() string {
@@ -598,19 +630,32 @@ func validateMTLSStanza(st *MTLSStanza, r AllowRule) error {
 	if st.ClientKey == "" || !validSecretRef(st.ClientKey) {
 		return fmt.Errorf("mtls %q missing or invalid client_key", st.Host)
 	}
-	if len(st.AllowedMethods) == 0 || len(st.AllowedPrefixes) == 0 {
-		return fmt.Errorf("mtls %q requires allowed_methods and allowed_path_prefixes", st.Host)
+	if st.LegacyAllowedMethods != nil {
+		return fmt.Errorf("mtls %q allowed_methods is no longer supported; use rules = [{ method = \"GET\", path_prefix = \"/v1/x/\" }]", st.Host)
 	}
-	for _, m := range st.AllowedMethods {
-		if m == "" || m != strings.ToUpper(m) {
-			return fmt.Errorf("mtls %q method %q must be uppercase", st.Host, m)
+	if st.LegacyAllowedPrefixes != nil {
+		return fmt.Errorf("mtls %q allowed_path_prefixes is no longer supported; use rules = [{ method = \"GET\", path_prefix = \"/v1/x/\" }]", st.Host)
+	}
+	if len(st.Rules) == 0 {
+		return fmt.Errorf("mtls %q requires at least one rule", st.Host)
+	}
+	seen := map[string]bool{}
+	for _, rule := range st.Rules {
+		if rule.Method == "" || rule.Method != strings.ToUpper(rule.Method) {
+			return fmt.Errorf("mtls %q method %q must be uppercase", st.Host, rule.Method)
 		}
-	}
-	for _, prefix := range st.AllowedPrefixes {
-		if err := validateHTTPPathPrefix(prefix); err != nil {
-			return fmt.Errorf("mtls %q path prefix %q: %w", st.Host, prefix, err)
+		if err := validateHTTPPathPrefix(rule.PathPrefix); err != nil {
+			return fmt.Errorf("mtls %q path prefix %q: %w", st.Host, rule.PathPrefix, err)
 		}
+		key := rule.Method + "\x00" + rule.PathPrefix
+		if seen[key] {
+			return fmt.Errorf("mtls %q has duplicate rule %s %s", st.Host, rule.Method, rule.PathPrefix)
+		}
+		seen[key] = true
 	}
+	// Legacy fields are detection-only and must never reach the matcher.
+	st.LegacyAllowedMethods = nil
+	st.LegacyAllowedPrefixes = nil
 	if st.ALPN == "" {
 		st.ALPN = "h2"
 	}
@@ -683,7 +728,54 @@ func ParseRule(raw string) (AllowRule, error) {
 	if strings.Trim(host, ".") == "" {
 		return AllowRule{}, errors.New("empty host")
 	}
+	if err := validateRuleHost(matchHost); err != nil {
+		return AllowRule{}, err
+	}
 	return AllowRule{Pattern: raw, Host: matchHost, Wildcard: wild, Port: port}, nil
+}
+
+// ParseExactRule is the command/response boundary for a concrete network
+// target. Unlike ParseRule it rejects wildcard syntax, so its result can be
+// safely rendered in a shell-shaped instruction.
+func ParseExactRule(raw string) (AllowRule, error) {
+	r, err := ParseRule(raw)
+	if err != nil {
+		return AllowRule{}, err
+	}
+	if r.Wildcard {
+		return AllowRule{}, errors.New("wildcards are not accepted here")
+	}
+	return r, nil
+}
+
+// FormatExactRule returns the canonical text for an exact rule. IPv6 is kept
+// bracketed when a non-default port is present so it cannot be ambiguous.
+func FormatExactRule(r AllowRule) string {
+	host := r.Host
+	if r.Port != 443 {
+		return net.JoinHostPort(host, strconv.Itoa(r.Port))
+	}
+	return host
+}
+
+func validateRuleHost(host string) error {
+	if ip := net.ParseIP(host); ip != nil {
+		return nil
+	}
+	if len(host) > 253 || strings.HasSuffix(host, ".") {
+		return errors.New("invalid DNS host")
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return errors.New("invalid DNS host")
+		}
+		for _, ch := range label {
+			if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-') {
+				return errors.New("invalid DNS host")
+			}
+		}
+	}
+	return nil
 }
 
 func splitHostPortDefault(raw string) (string, int, error) {

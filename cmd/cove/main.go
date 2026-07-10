@@ -4,10 +4,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"cove/internal/box"
+	"cove/internal/clierr"
 	"cove/internal/config"
+	"cove/internal/connection"
+	"cove/internal/help"
 	"cove/internal/launcher"
 	"cove/internal/logcmd"
 	"cove/internal/proxy"
@@ -15,175 +19,228 @@ import (
 	"cove/internal/version"
 )
 
+const (
+	invocationLauncher = "launcher"
+	invocationCommand  = "command"
+	invocationInternal = "internal"
+)
+
+// Invocation is the result of the ordered command-line grammar. AgentArgv is
+// always a slice of the process argv; it is never reconstructed from text.
+type Invocation struct {
+	Kind      string
+	Name      string
+	Args      []string
+	AgentArgv []string
+	Project   string
+	NoAudit   bool
+	Verbose   bool
+	DryRun    bool
+	Help      bool
+	Version   bool
+}
+
 func main() {
 	os.Exit(run(os.Args))
 }
 
 func run(args []string) int {
+	inv, err := parseInvocation(args)
+	if err != nil {
+		return clierr.Print(os.Stderr, err)
+	}
+
+	switch inv.Kind {
+	case invocationInternal:
+		return runInternal(inv)
+	case invocationCommand:
+		if inv.Name != "help" && len(inv.Args) == 1 && (inv.Args[0] == "--help" || inv.Args[0] == "-h") {
+			return exitFor(help.Run([]string{inv.Name}))
+		}
+		return runPublic(inv)
+	default:
+		return launcherMain(inv)
+	}
+}
+
+// parseInvocation implements the grammar in architecture §2.1. Keep its
+// branches in the specified order: hidden roles, -- escape, public commands,
+// then launcher flags and the first positional agent.
+func parseInvocation(args []string) (Invocation, error) {
 	if len(args) == 0 {
 		args = []string{"cove"}
 	}
-	switch detectRole(args) {
-	case "proxyd":
-		return proxydMain(args[2:])
-	case "__init":
-		return box.InitMain()
-	case "__agent":
-		return box.AgentMain(args[2:])
-	case "__apparmor":
-		return exitFor(setup.ApparmorOnly())
-	case "__probe_userns":
-		return exitFor(setup.ProbeUsernsSelf())
-	case "setup":
-		return exitFor(setup.Run(args[2:]))
-	case "log":
-		return exitFor(logcmd.Run(args[2:]))
-	default:
-		return launcherMain(args[1:])
-	}
-}
 
-func detectRole(args []string) string {
-	if len(args) < 2 {
-		return "launcher"
+	if len(args) > 1 {
+		if isInternalRole(args[1]) {
+			return Invocation{Kind: invocationInternal, Name: args[1], Args: args[2:]}, nil
+		}
+		if args[1] == "--" {
+			if len(args) < 3 {
+				return Invocation{}, usageError("missing agent after --")
+			}
+			return Invocation{Kind: invocationLauncher, AgentArgv: args[2:], Project: "."}, nil
+		}
+		if isPublicCommand(args[1]) || args[1] == "doctor" {
+			name := args[1]
+			if name == "doctor" {
+				name = "status"
+			}
+			return Invocation{Kind: invocationCommand, Name: name, Args: args[2:]}, nil
+		}
 	}
-	switch args[1] {
-	case "proxyd", "__init", "__agent", "__apparmor", "__probe_userns", "setup", "log":
-		return args[1]
-	default:
-		return "launcher"
-	}
-}
 
-func launcherMain(args []string) int {
 	fs := flag.NewFlagSet("cove", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
+	fs.SetOutput(io.Discard)
 	project := fs.String("project", ".", "project directory mounted at /work")
 	fs.StringVar(project, "C", ".", "project directory mounted at /work")
 	noAudit := fs.Bool("no-audit", false, "disable audit for this run")
 	verbose := fs.Bool("verbose", false, "print launcher diagnostics")
 	fs.BoolVar(verbose, "v", false, "print launcher diagnostics")
 	dryRun := fs.Bool("dry-run", false, "print launch plan and exit")
-	help := fs.Bool("help", false, "show help")
-	fs.BoolVar(help, "h", false, "show help")
+	helpFlag := fs.Bool("help", false, "show help")
+	fs.BoolVar(helpFlag, "h", false, "show help")
 	versionFlag := fs.Bool("version", false, "show version")
-	fs.Usage = usage
-
-	split := -1
-	for i, arg := range args {
-		if arg == "--" {
-			split = i
-			break
-		}
+	if err := fs.Parse(args[1:]); err != nil {
+		return Invocation{}, clierr.Wrap(clierr.EXUsage, "invalid launcher option", nil, "cove help", err)
 	}
-	flagArgs := args
-	agentArgs := []string(nil)
-	if split >= 0 {
-		flagArgs = args[:split]
-		agentArgs = args[split+1:]
-	}
-	if err := fs.Parse(flagArgs); err != nil {
-		return 64
-	}
-	if *help {
-		usage()
-		return 0
-	}
-	if *versionFlag {
-		fmt.Printf("cove %s\n", version.Version)
-		return 0
-	}
-	if split < 0 {
-		usage()
-		return 64
-	}
-	if len(agentArgs) == 0 {
-		fmt.Fprintln(os.Stderr, "cove: missing agent after --")
-		return 64
-	}
-
-	cfg, err := config.Load("")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cove: config: %v\n", err)
-		return 78
-	}
-	code, err := launcher.Run(cfg, launcher.Opts{
+	inv := Invocation{
+		Kind:      invocationLauncher,
+		AgentArgv: fs.Args(),
 		Project:   *project,
 		NoAudit:   *noAudit,
 		Verbose:   *verbose,
 		DryRun:    *dryRun,
-		AgentArgv: agentArgs,
+		Help:      *helpFlag,
+		Version:   *versionFlag,
+	}
+	if inv.Help || inv.Version {
+		return inv, nil
+	}
+	if len(inv.AgentArgv) == 0 {
+		return Invocation{}, usageError("missing agent")
+	}
+	return inv, nil
+}
+
+func isInternalRole(name string) bool {
+	switch name {
+	case "proxyd", "__init", "__agent", "__apparmor", "__probe_userns", "__status_probe":
+		return true
+	default:
+		return false
+	}
+}
+
+func isPublicCommand(name string) bool {
+	_, ok := public[name]
+	return ok
+}
+
+var public = map[string]func([]string) error{
+	"setup":    setup.Run,
+	"status":   unavailable,
+	"add":      unavailable,
+	"allow":    connection.Allow,
+	"remove":   unavailable,
+	"list":     unavailable,
+	"log":      logcmd.Run,
+	"config":   unavailable,
+	"sessions": unavailable,
+	"explain":  unavailable,
+	"help":     help.Run,
+}
+
+func runPublic(inv Invocation) int {
+	return exitFor(public[inv.Name](inv.Args))
+}
+
+func unavailable(args []string) error {
+	return clierr.Wrap(clierr.EXUsage, "command not available yet", nil, "cove help", nil)
+}
+
+func runInternal(inv Invocation) int {
+	switch inv.Name {
+	case "proxyd":
+		return proxydMain(inv.Args)
+	case "__init":
+		return box.InitMain()
+	case "__agent":
+		return box.AgentMain(inv.Args)
+	case "__apparmor":
+		return exitFor(setup.ApparmorOnly())
+	case "__probe_userns":
+		return exitFor(setup.ProbeUsernsSelf())
+	case "__status_probe":
+		return exitFor(unavailable(nil))
+	default:
+		return clierr.Print(os.Stderr, usageError("unknown internal role"))
+	}
+}
+
+func launcherMain(inv Invocation) int {
+	if inv.Help {
+		return exitFor(help.Run(nil))
+	}
+	if inv.Version {
+		fmt.Printf("cove %s\n", version.Version)
+		return 0
+	}
+	cfg, err := config.Load("")
+	if err != nil {
+		return clierr.Print(os.Stderr, err)
+	}
+	code, err := launcher.Run(cfg, launcher.Opts{
+		Project:   inv.Project,
+		NoAudit:   inv.NoAudit,
+		Verbose:   inv.Verbose,
+		DryRun:    inv.DryRun,
+		AgentArgv: inv.AgentArgv,
 		Version:   version.Version,
 	})
 	if err != nil {
 		var exitErr launcher.ExitError
 		if errors.As(err, &exitErr) {
-			fmt.Fprintln(os.Stderr, exitErr.Error())
-			return exitErr.Code
+			return clierr.Print(os.Stderr, exitErr.CLIError())
 		}
-		fmt.Fprintf(os.Stderr, "cove: %v\n", err)
-		return code
+		return clierr.Print(os.Stderr, clierr.Wrap(code, "could not start the agent", nil, "cove status", err))
 	}
 	return code
 }
 
 func proxydMain(args []string) int {
 	fs := flag.NewFlagSet("cove proxyd", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	help := fs.Bool("help", false, "show help")
+	fs.SetOutput(io.Discard)
+	helpFlag := fs.Bool("help", false, "show help")
 	if err := fs.Parse(args); err != nil {
-		return 64
+		return clierr.Print(os.Stderr, clierr.Wrap(clierr.EXUsage, "invalid proxy option", nil, "cove help", err))
 	}
-	if *help {
+	if *helpFlag {
+		// proxyd is deliberately callable but not part of the public help surface.
 		fmt.Fprintln(os.Stderr, "usage: cove proxyd")
 		return 0
 	}
 	cfg, err := config.Load("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cove proxyd: config: %v\n", err)
-		return 78
+		return clierr.Print(os.Stderr, err)
 	}
 	if err := proxy.Serve(cfg, ""); err != nil {
-		fmt.Fprintf(os.Stderr, "cove proxyd: %v\n", err)
-		return 69
+		return clierr.Print(os.Stderr, clierr.Wrap(clierr.EXUnavailable, "proxy unavailable", nil, "cove status", err))
 	}
 	return 0
+}
+
+func usageError(what string) error {
+	return clierr.Wrap(clierr.EXUsage, what, nil, "cove help", nil)
 }
 
 func exitFor(err error) int {
 	if err == nil {
 		return 0
 	}
-	var coded interface{ ExitCode() int }
-	if errors.As(err, &coded) {
-		fmt.Fprintln(os.Stderr, err)
-		return coded.ExitCode()
+	var adapted interface{ CLIError() *clierr.Error }
+	if errors.As(err, &adapted) {
+		return clierr.Print(os.Stderr, adapted.CLIError())
 	}
-	fmt.Fprintln(os.Stderr, err)
-	return 1
-}
-
-func usage() {
-	fmt.Fprintf(os.Stderr, `usage:
-  cove [flags] -- <agent> [args...]
-  cove setup
-  cove proxyd
-  cove log [--follow] [--session ID] [--host HOST] [--deny-only]
-
-cove runs contained agent sessions behind a credential firewall. The agent gets
-the workspace and configured mounts; outbound HTTPS goes through the cove proxy
-for allow/deny policy, credential injection, and audit records.
-
-flags:
-  -C, --project DIR   project mounted at /work (default: cwd)
-      --no-audit      disable audit for this run
-  -v, --verbose       print launcher diagnostics
-      --dry-run       print launch plan and exit
-      --version       show version
-
-examples:
-  cove -- claude -p "summarize this repo"
-  cove -C ~/src/project -- codex exec "run the tests"
-  cove log --deny-only --host evil.example.com
-`)
+	return clierr.Print(os.Stderr, err)
 }

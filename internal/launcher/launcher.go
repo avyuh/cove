@@ -21,7 +21,10 @@ import (
 	"unsafe"
 
 	"cove/internal/box"
+	"cove/internal/clierr"
 	"cove/internal/config"
+	"cove/internal/proxy"
+	"cove/internal/session"
 	"cove/internal/setup"
 	"cove/internal/version"
 )
@@ -40,6 +43,18 @@ type ExitError struct {
 	Msg  string
 }
 
+// ProxySession owns the REGISTER/2 control stream. Its reader is deliberately
+// silent: receipt presentation belongs to the later denial-loop card, never to
+// the agent TTY.
+type ProxySession struct {
+	Conn   net.Conn
+	Reader *bufio.Reader
+	Socket string
+	ID     string
+	events chan json.RawMessage
+	done   chan struct{}
+}
+
 const usernsDeniedMessage = "cove: user namespaces denied; run `cove setup` (needs sudo, once)"
 
 var (
@@ -55,6 +70,11 @@ var sigV4DummyEnv = map[string]string{
 
 func (e ExitError) Error() string {
 	return e.Msg
+}
+
+// CLIError is the temporary adapter for the legacy launcher error carrier.
+func (e ExitError) CLIError() *clierr.Error {
+	return clierr.Wrap(e.Code, e.Msg, nil, "cove status", e)
 }
 
 func Run(cfg *config.Config, opts Opts) (int, error) {
@@ -75,17 +95,24 @@ func Run(cfg *config.Config, opts Opts) (int, error) {
 	if err := sweepRoots(false); err != nil && opts.Verbose {
 		fmt.Fprintf(os.Stderr, "cove: cleanup warning: %v\n", err)
 	}
-	control, sessionSock, err := ensureProxySession(opts.AgentArgv[0])
+	auditEnabled := cfg.Options.Audit && !opts.NoAudit
+	session, meta, stored, err := ensureProxySession(opts.AgentArgv[0], auditEnabled, project)
 	if err != nil {
 		return 69, ExitError{Code: 69, Msg: "cove proxy unavailable: " + err.Error()}
 	}
-	defer control.Close()
-	d, err := buildDirectives(cfg, opts, project, sessionSock)
+	defer session.Conn.Close()
+	store := sessionStore()
+	d, err := buildDirectives(cfg, opts, project, session.Socket)
 	if err != nil {
+		finishSessionMetadata(store, meta, stored, 78)
 		return 78, err
 	}
 	d.ProxyEnabled = true
 	code, err := spawnInit(d, opts.Verbose)
+	finishSessionMetadata(store, meta, stored, code)
+	if !session.drain() {
+		fmt.Fprintln(os.Stderr, "denial receipt unavailable")
+	}
 	return code, err
 }
 
@@ -342,12 +369,14 @@ func initStatusFailure(line string) (int, error) {
 	return 75, ExitError{Code: 75, Msg: "cove: box setup failed: " + line}
 }
 
-func ensureProxySession(agentPath string) (net.Conn, string, error) {
+func ensureProxySession(agentPath string, audit bool, project string) (*ProxySession, session.Metadata, bool, error) {
 	sock := filepath.Join(config.StateDir(), "proxyd.sock")
 	if err := pingProxy(sock); err != nil {
-		_ = os.Remove(sock)
+		if _, statErr := os.Lstat(sock); statErr == nil {
+			return nil, session.Metadata{}, false, fmt.Errorf("proxy socket is unavailable: %w", err)
+		}
 		if err := spawnProxy(); err != nil {
-			return nil, "", err
+			return nil, session.Metadata{}, false, err
 		}
 		deadline := time.Now().Add(2 * time.Second)
 		for {
@@ -355,39 +384,138 @@ func ensureProxySession(agentPath string) (net.Conn, string, error) {
 				break
 			}
 			if time.Now().After(deadline) {
-				return nil, "", fmt.Errorf("PING timed out")
+				return nil, session.Metadata{}, false, fmt.Errorf("PING timed out")
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
-	}
-	c, err := net.DialTimeout("unix", sock, 250*time.Millisecond)
-	if err != nil {
-		return nil, "", err
-	}
-	sessionID, err := newSessionID()
-	if err != nil {
-		_ = c.Close()
-		return nil, "", err
 	}
 	agent := filepath.Base(agentPath)
 	if agent == "" || agent == "." || agent == string(filepath.Separator) {
 		agent = "agent"
 	}
-	if _, err := fmt.Fprintf(c, "REGISTER %s %s\n", sessionID, sanitizeAgent(agent)); err != nil {
-		_ = c.Close()
-		return nil, "", err
+	store := sessionStore()
+	for attempt := 0; attempt < 32; attempt++ {
+		sessionID, err := newSessionID()
+		if err != nil {
+			return nil, session.Metadata{}, false, err
+		}
+		if store.Exists(sessionID) {
+			continue
+		}
+		s, err := registerProxySession(sock, sessionID, sanitizeAgent(agent), audit)
+		if err != nil {
+			if isSessionCollision(err) {
+				continue
+			}
+			return nil, session.Metadata{}, false, err
+		}
+		m := session.Metadata{Schema: session.Schema, ID: sessionID, Agent: sanitizeAgent(agent), StartedAt: time.Now().UTC(), ProjectBasename: filepath.Base(project), Audit: audit, Complete: false}
+		if err := store.Create(m); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				_ = s.drain()
+				_ = s.Conn.Close()
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "cove: warning: could not save session metadata: %v\n", err)
+			return s, m, false, nil
+		}
+		return s, m, true, nil
 	}
-	line, err := bufio.NewReader(c).ReadString('\n')
+	return nil, session.Metadata{}, false, errors.New("could not allocate a unique session ID")
+}
+
+func registerProxySession(sock, sessionID, agent string, audit bool) (*ProxySession, error) {
+	c, err := net.DialTimeout("unix", sock, 250*time.Millisecond)
+	if err != nil {
+		return nil, err
+	}
+	auditValue := audit
+	payload, err := json.Marshal(proxy.RegisterRequest{Session: sessionID, Agent: agent, Audit: &auditValue})
 	if err != nil {
 		_ = c.Close()
-		return nil, "", err
+		return nil, err
+	}
+	if _, err := fmt.Fprintf(c, "REGISTER/2 %s\n", payload); err != nil {
+		_ = c.Close()
+		return nil, err
+	}
+	reader := bufio.NewReader(c)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		_ = c.Close()
+		return nil, err
 	}
 	line = strings.TrimSpace(line)
-	if !strings.HasPrefix(line, "OK ") {
+	if !strings.HasPrefix(line, "OK/2 ") {
 		_ = c.Close()
-		return nil, "", errors.New(line)
+		return nil, errors.New(line + "; run cove status")
 	}
-	return c, strings.TrimSpace(strings.TrimPrefix(line, "OK ")), nil
+	var ok struct {
+		Socket  string `json:"socket"`
+		Session string `json:"session"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "OK/2 ")), &ok); err != nil || ok.Socket == "" || ok.Session != sessionID {
+		_ = c.Close()
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("malformed OK/2")
+	}
+	s := &ProxySession{Conn: c, Reader: reader, Socket: ok.Socket, ID: sessionID, events: make(chan json.RawMessage, 128), done: make(chan struct{})}
+	go s.readControl()
+	return s, nil
+}
+
+func isSessionCollision(err error) bool {
+	return strings.Contains(err.Error(), "session socket already live")
+}
+
+func sessionStore() session.Store { return session.NewStore(config.StateDir(), os.Stderr) }
+
+func finishSessionMetadata(store session.Store, m session.Metadata, stored bool, code int) {
+	if !stored {
+		return
+	}
+	now := time.Now().UTC()
+	m.EndedAt, m.ExitCode, m.Complete = &now, &code, true
+	if err := store.Replace(m); err != nil {
+		fmt.Fprintf(os.Stderr, "cove: warning: could not finish session metadata: %v\n", err)
+	}
+}
+
+func (s *ProxySession) readControl() {
+	defer close(s.done)
+	defer close(s.events)
+	for {
+		line, err := s.Reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "EVENT/2 ") {
+			select {
+			case s.events <- json.RawMessage(strings.TrimPrefix(line, "EVENT/2 ")):
+			default:
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "END/2 ") {
+			return
+		}
+		return
+	}
+}
+
+func (s *ProxySession) drain() bool {
+	if _, err := io.WriteString(s.Conn, "DONE/2\n"); err != nil {
+		return false
+	}
+	select {
+	case <-s.done:
+		return true
+	case <-time.After(2 * time.Second):
+		return false
+	}
 }
 
 func pingProxy(sock string) error {

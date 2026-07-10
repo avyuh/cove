@@ -37,21 +37,33 @@ Every request gets a JSONL audit record with its verdict: `allow`, `inject`, or
 
 ## Install
 
-Linux only; built and tested on Ubuntu 24.04. Needs Go to build.
+Linux only; built and tested on Ubuntu 24.04. Install a signed release binary:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/avyuh/cove/main/install.sh | sh
+cove setup
+```
+
+The installer places `cove` in `~/.local/bin`; add that directory to `PATH` if
+it is not already there. To install a specific release, set `COVE_VERSION`, or
+download the matching release archive and verify it against `checksums.txt`.
+
+To build from source instead, you need Go:
 
 ```sh
 go build -o cove ./cmd/cove
-sudo install -m0755 cove /usr/local/bin/cove
-sudo cove setup
+install -m0755 cove ~/.local/bin/cove
+cove setup
 ```
 
-`cove setup` is one-time and idempotent. The only step that needs root is
-installing an AppArmor profile for `/usr/local/bin/cove` — Ubuntu 24.04 blocks
+`cove setup` is one-time and idempotent. Run it as your user: it self-elevates
+only when installing an AppArmor profile for the installed cove executable.
+Ubuntu 24.04 blocks
 unprivileged user namespaces by default, and the profile grants them to cove
 the same way Podman and bwrap do (on distros where userns already works, the
 step is skipped). As your user, setup generates cove's CA, creates
-`~/.config/cove/config.toml` from the seed if absent, and prints which inject
-secrets are still unpopulated.
+`~/.config/cove/config.toml` from the seed if absent. Run `cove status` for a
+readiness checklist, including credential availability without printing values.
 
 ## Run
 

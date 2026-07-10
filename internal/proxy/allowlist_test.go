@@ -88,8 +88,7 @@ max_body_bytes=1
 host="partner.example"
 client_cert="file:/tmp/cert"
 client_key="file:/tmp/key"
-allowed_methods=["GET"]
-allowed_path_prefixes=["/"]
+rules=[{method="GET", path_prefix="/"}]
 `))
 	if err != nil {
 		t.Fatal(err)

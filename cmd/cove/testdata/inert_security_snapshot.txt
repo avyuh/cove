@@ -1,0 +1,4 @@
+# Baseline default-config security snapshot. This contains policy labels only.
+api.anthropic.com:443 inject
+evil.example.invalid:443 deny
+api.openai.com:443 inject

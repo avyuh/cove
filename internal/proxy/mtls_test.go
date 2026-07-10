@@ -106,7 +106,7 @@ func TestMTLSUpstreamTerminationH2AndH1(t *testing.T) {
 }
 
 func TestMTLSRejectsPolicyBeforeUpstream(t *testing.T) {
-	st := &config.MTLSStanza{AllowedMethods: []string{http.MethodGet}, AllowedPrefixes: []string{"/v1/limited/"}}
+	st := &config.MTLSStanza{Rules: []config.MTLSRule{{Method: http.MethodGet, PathPrefix: "/v1/limited/"}}}
 	a := mtlsAuthorizer{stanza: st}
 	for _, tc := range []struct{ method, path, reason string }{
 		{http.MethodPost, "/v1/limited/x", "policy_method"},
@@ -133,6 +133,69 @@ func TestMTLSMissingCertificateDoesNotDial(t *testing.T) {
 	callback := mtlsClientCertificate(nil, st)
 	if _, err := callback(nil); err == nil {
 		t.Fatal("missing client material was accepted")
+	}
+}
+
+func TestMTLSRulePairsDoNotFormCartesianProduct(t *testing.T) {
+	a := mtlsAuthorizer{stanza: &config.MTLSStanza{Rules: []config.MTLSRule{
+		{Method: http.MethodGet, PathPrefix: "/a/"},
+		{Method: http.MethodPost, PathPrefix: "/b/"},
+	}}}
+	for _, tc := range []struct {
+		method, path string
+		reason       string
+	}{
+		{http.MethodGet, "/a/item", ""},
+		{http.MethodPost, "/b/item", ""},
+		{http.MethodGet, "/b/item", "policy_resource"},
+		{http.MethodPost, "/a/item", "policy_resource"},
+	} {
+		t.Run(tc.method+tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "https://partner.example"+tc.path, nil)
+			_, err := a.Authorize(req)
+			if tc.reason == "" {
+				if err != nil {
+					t.Fatalf("Authorize() error = %v", err)
+				}
+				return
+			}
+			pe, ok := err.(*PolicyError)
+			if !ok || pe.Reason != tc.reason {
+				t.Fatalf("Authorize() error = %v, want %s", err, tc.reason)
+			}
+		})
+	}
+}
+
+func TestMTLSLegacySchemaReloadRetainsMatcherAndFreshLoadFailsClosed(t *testing.T) {
+	valid, err := config.LoadBytes([]byte(`allow = ["still-allowed.example"]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Proxyd{cfg: valid, matcher: NewMatcher(valid)}
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	if err := os.MkdirAll(filepath.Join(configHome, "cove"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := []byte(`[[mtls]]
+host = "partner.example"
+client_cert = "env:CERT"
+client_key = "env:KEY"
+allowed_methods = ["GET"]
+allowed_path_prefixes = ["/v1/"]
+`)
+	if err := os.WriteFile(config.DefaultPath(), legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.reload(); err == nil {
+		t.Fatal("legacy schema reload succeeded")
+	}
+	if policy, _ := p.matcher.Match("still-allowed.example", 443); policy != PolicyAllow {
+		t.Fatalf("reload replaced the last valid matcher: policy=%v", policy)
+	}
+	if _, err := config.Load(""); err == nil {
+		t.Fatal("fresh proxyd configuration load accepted legacy schema")
 	}
 }
 
@@ -321,8 +384,7 @@ func mtlsConfig(t *testing.T, host string, port int, certRef, keyRef, alpn strin
 host = %q
 client_cert = %q
 client_key = %q
-allowed_methods = ["POST"]
-allowed_path_prefixes = ["/v1/limited/"]
+rules = [{ method = "POST", path_prefix = "/v1/limited/" }]
 alpn = %q
 `, fmt.Sprintf("%s:%d", host, port), certRef, keyRef, alpn)))
 	if err != nil {

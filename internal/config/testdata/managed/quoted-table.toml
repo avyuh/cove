@@ -1,0 +1,3 @@
+["not managed"]
+note = "# END COVE MANAGED"
+allow = ["user.example.com"]

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -102,8 +103,8 @@ func TestRegisterUnlinksSessionSocketOnControlClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := strings.TrimSpace(strings.TrimPrefix(line, "OK "))
-	if path == line {
+	path := controlSocket(t, line)
+	if path == "" {
 		t.Fatalf("register response = %q, want OK", line)
 	}
 	if _, err := os.Stat(path); err != nil {
@@ -168,14 +169,14 @@ func TestSessionSocketHandlesParallelConnectsAndAuditsOneSession(t *testing.T) {
 	registerDone := make(chan struct{})
 	go func() {
 		defer close(registerDone)
-		p.register(server, Session{ID: "feedbeef", Agent: "agent"})
+		p.register(server, Session{ID: "feedbeef", Agent: "agent", Audit: true})
 	}()
 	line, err := bufio.NewReader(control).ReadString('\n')
 	if err != nil {
 		t.Fatal(err)
 	}
-	sock := strings.TrimSpace(strings.TrimPrefix(line, "OK "))
-	if sock == line {
+	sock := controlSocket(t, line)
+	if sock == "" {
 		t.Fatalf("register response = %q, want OK", line)
 	}
 
@@ -221,6 +222,19 @@ func TestSessionSocketHandlesParallelConnectsAndAuditsOneSession(t *testing.T) {
 	}
 	_ = upstream.Close()
 	<-upstreamDone
+}
+
+func controlSocket(t *testing.T, line string) string {
+	t.Helper()
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "OK/2 ") {
+		return ""
+	}
+	var ok controlOK
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "OK/2 ")), &ok); err != nil {
+		t.Fatal(err)
+	}
+	return ok.Socket
 }
 
 func connectOnce(sock, portText string) error {

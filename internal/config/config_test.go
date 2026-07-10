@@ -1,10 +1,13 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"cove/internal/clierr"
 )
 
 func TestSeedValidates(t *testing.T) {
@@ -340,9 +343,12 @@ func TestMTLSValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, change := range map[string][2]string{
-		"wildcard": {"partner.example.com", "*.example.com"}, "lower method": {`["GET", "POST"]`, `["get"]`},
-		"empty prefixes": {`["/v1/limited/"]`, `[]`}, "relative prefix": {`"/v1/limited/"`, `"v1"`},
-		"encoded separator": {`"/v1/limited/"`, `"/v1%2fprivate"`}, "traversal": {`"/v1/limited/"`, `"/v1/../private"`},
+		"wildcard":          {"partner.example.com", "*.example.com"},
+		"lower method":      {`method="GET"`, `method="get"`},
+		"empty rules":       {`rules=[{method="GET", path_prefix="/v1/limited/"}, {method="POST", path_prefix="/v1/limited/"}]`, `rules=[]`},
+		"relative prefix":   {`path_prefix="/v1/limited/"`, `path_prefix="v1"`},
+		"encoded separator": {`path_prefix="/v1/limited/"`, `path_prefix="/v1%2fprivate"`},
+		"traversal":         {`path_prefix="/v1/limited/"`, `path_prefix="/v1/../private"`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := LoadBytes([]byte(strings.Replace(valid, change[0], change[1], 1))); err == nil {
@@ -383,8 +389,56 @@ func validMTLS(host string) string {
 host="` + host + `"
 client_cert="env:CERT"
 client_key="env:KEY"
-allowed_methods=["GET", "POST"]
-allowed_path_prefixes=["/v1/limited/"]`
+rules=[{method="GET", path_prefix="/v1/limited/"}, {method="POST", path_prefix="/v1/limited/"}]`
+}
+
+func TestMTLSLegacyArraysRejectedWithPositionAndPairExample(t *testing.T) {
+	for _, tc := range []struct {
+		name, legacyKey string
+		line            int
+	}{
+		{"methods", `allowed_methods = ["GET"]`, 6},
+		{"empty prefixes", `allowed_path_prefixes = []`, 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := DecodeDocument("policy.toml", []byte(`[[mtls]]
+host = "partner.example"
+client_cert = "env:CERT"
+client_key = "env:KEY"
+rules = [{ method = "GET", path_prefix = "/v1/" }]
+`+tc.legacyKey+"\n"))
+			if err == nil {
+				t.Fatal("legacy mTLS arrays were accepted")
+			}
+			var cli *clierr.Error
+			if !errors.As(err, &cli) || cli.Code != clierr.EXConfig || cli.Where == nil {
+				t.Fatalf("error = %#v, want positioned EX_CONFIG", err)
+			}
+			if cli.Where.Path != "policy.toml" || cli.Where.Line != tc.line || cli.Where.Column != 1 || cli.Fix != "cove config edit" {
+				t.Fatalf("location/fix = %#v/%q, want policy.toml:%d:1 and cove config edit", cli.Where, cli.Fix, tc.line)
+			}
+			got := cli.Where.Detail
+			for _, want := range []string{strings.Split(tc.legacyKey, " ")[0], `rules = [{ method = "GET", path_prefix = "/v1/x/" }]`} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("error %q does not contain %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestMTLSRulesValidation(t *testing.T) {
+	valid := validMTLS("partner.example")
+	for _, change := range [][2]string{
+		{`rules=[{method="GET", path_prefix="/v1/limited/"}, {method="POST", path_prefix="/v1/limited/"}]`, `rules=[]`},
+		{`method="GET"`, `method="get"`},
+		{`{method="POST", path_prefix="/v1/limited/"}`, `{method="GET", path_prefix="/v1/limited/"}`},
+		{`path_prefix="/v1/limited/"}`, `path_prefix="/v1/%2f/"}`},
+	} {
+		if _, err := LoadBytes([]byte(strings.Replace(valid, change[0], change[1], 1))); err == nil {
+			t.Fatalf("accepted invalid mTLS rule after %q -> %q", change[0], change[1])
+		}
+	}
 }
 
 func validGitHubBasic() string {

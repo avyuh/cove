@@ -27,28 +27,26 @@ func (a mtlsAuthorizer) Authorize(req *http.Request) (*AuthDecision, error) {
 	if a.stanza == nil {
 		return nil, &PolicyError{Status: http.StatusBadGateway, Reason: "secret_unavailable", AuthMode: a.Mode()}
 	}
-	if !methodAllowed(req.Method, a.stanza.AllowedMethods) {
-		return nil, &PolicyError{Status: http.StatusForbidden, Reason: "policy_method", AuthMode: a.Mode()}
-	}
-	if !matchMethodPathPolicy(req, a.stanza.AllowedPrefixes) {
-		return nil, &PolicyError{Status: http.StatusForbidden, Reason: "policy_resource", AuthMode: a.Mode()}
-	}
-	return &AuthDecision{Applied: true}, nil
-}
-
-func methodAllowed(method string, allowed []string) bool {
-	for _, candidate := range allowed {
-		if method == candidate {
-			return true
+	hasMethod := false
+	for _, rule := range a.stanza.Rules {
+		if req.Method != rule.Method {
+			continue
+		}
+		hasMethod = true
+		if matchPathPrefix(req, rule.PathPrefix) {
+			return &AuthDecision{Applied: true}, nil
 		}
 	}
-	return false
+	if !hasMethod {
+		return nil, &PolicyError{Status: http.StatusForbidden, Reason: "policy_method", AuthMode: a.Mode()}
+	}
+	return nil, &PolicyError{Status: http.StatusForbidden, Reason: "policy_resource", AuthMode: a.Mode()}
 }
 
-// matchMethodPathPolicy matches a request path by decoded, segment boundaries.
+// matchPathPrefix matches a request path by decoded, segment boundaries.
 // It rejects unsafe spellings rather than cleaning them, since cleaning could
 // turn a request outside the policy into an allowed path.
-func matchMethodPathPolicy(req *http.Request, prefixes []string) bool {
+func matchPathPrefix(req *http.Request, prefix string) bool {
 	if req == nil || req.URL == nil {
 		return false
 	}
@@ -56,23 +54,16 @@ func matchMethodPathPolicy(req *http.Request, prefixes []string) bool {
 	if !ok {
 		return false
 	}
-	for _, prefix := range prefixes {
-		segments, ok := safeHTTPPathSegments(prefix)
-		if !ok || len(segments) > len(path) {
-			continue
-		}
-		matched := true
-		for i := range segments {
-			if segments[i] != path[i] {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			return true
+	segments, ok := safeHTTPPathSegments(prefix)
+	if !ok || len(segments) > len(path) {
+		return false
+	}
+	for i := range segments {
+		if segments[i] != path[i] {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func safeHTTPPathSegments(escaped string) ([]string, bool) {
