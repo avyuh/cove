@@ -1,4 +1,6 @@
 # Baseline default-config security snapshot. This contains policy labels only.
+# The minimal seed pre-seeds only Claude's zero-config OAuth inject; other services
+# (OpenAI, etc.) are added on demand via `cove add <service>`, so they deny until then.
 api.anthropic.com:443 inject
 evil.example.invalid:443 deny
-api.openai.com:443 inject
+api.openai.com:443 deny
