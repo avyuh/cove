@@ -54,6 +54,9 @@ func Add(args []string) error {
 	if args[0] == "github" {
 		return addGitHub(args[1:])
 	}
+	if args[0] == "codex-login" {
+		return addCodexLogin(args[1:])
+	}
 	s, ok := services[args[0]]
 	if !ok {
 		return clierr.Wrap(clierr.EXUsage, "unknown service "+args[0], nil, "cove help add", nil)
@@ -242,6 +245,20 @@ func blockPresentBase(cfg *config.Config, m *config.ManagedConfig, kind, host st
 func removeGitHubManaged(m *config.ManagedConfig) {
 	m.Inject = removeInjectNames(m.Inject, "github", "github-api")
 	m.Allow = removeAllowNames(m.Allow, "github", "github-api")
+	m.Expose = removeExposeNames(m.Expose, "github-oauth")
+}
+func removeExposeNames(in []config.ExposeStanza, names ...string) []config.ExposeStanza {
+	out := in[:0]
+	for _, x := range in {
+		found := false
+		for _, n := range names {
+			found = found || x.Name == n
+		}
+		if !found {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 func removeInjectNames(in []config.InjectStanza, names ...string) []config.InjectStanza {
 	out := in[:0]
@@ -281,12 +298,44 @@ func addGitHubOAuth(cfg *config.Config, yes bool) error {
 		blockPresentBase(cfg, m, "allow", "api.github.com")
 		blockPresentBase(cfg, m, "inject", "github.com")
 		blockPresentBase(cfg, m, "inject", "api.github.com")
+		m.Expose = append(m.Expose, config.ExposeStanza{Name: "github-oauth", Path: "~/.config/gh", Mode: "ro", Reason: "GitHub OAuth login"})
 		m.Allow = append(m.Allow, config.NamedAllow{Name: "github", Host: "github.com"}, config.NamedAllow{Name: "github-api", Host: "api.github.com"})
 		return nil
 	}); err != nil {
 		return err
 	}
 	fprint(commandOutput, "saved: github OAuth; PAT stored, disabled\nundo: cove remove github\n")
+	return nil
+}
+
+func addCodexLogin(args []string) error {
+	fs := flag.NewFlagSet("cove add codex-login", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	yes := fs.Bool("yes", false, "skip confirmation")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
+		return clierr.Wrap(clierr.EXUsage, "invalid codex-login option", nil, "cove help add", err)
+	}
+	cfg, err := config.Load("")
+	if err != nil {
+		return err
+	}
+	preview := "Codex's real refreshable ChatGPT credential becomes readable and WRITABLE inside the box.\nConcurrent Codex sessions can update this shared login at the same time.\nhosts: chatgpt.com, auth.openai.com\nundo: cove remove codex-login\n"
+	if err := confirmMutation(preview, *yes); err != nil {
+		return clierr.Wrap(clierr.EXUsage, "add was not confirmed", nil, "rerun with --yes", err)
+	}
+	if err := commitManaged(context.Background(), func(m *config.ManagedConfig) error {
+		m.Expose = removeExposeNames(m.Expose, "codex-login")
+		m.Allow = removeAllowNames(m.Allow, "codex-login-chatgpt", "codex-login-auth")
+		for _, host := range []string{"chatgpt.com", "auth.openai.com"} {
+			blockPresentBase(cfg, m, "allow", host)
+		}
+		m.Expose = append(m.Expose, config.ExposeStanza{Name: "codex-login", Path: "~/.codex", Mode: "rw", Reason: "Codex refreshes its ChatGPT login"})
+		m.Allow = append(m.Allow, config.NamedAllow{Name: "codex-login-chatgpt", Host: "chatgpt.com"}, config.NamedAllow{Name: "codex-login-auth", Host: "auth.openai.com"})
+		return nil
+	}); err != nil {
+		return err
+	}
+	fprint(commandOutput, "saved: codex-login\nundo: cove remove codex-login\n")
 	return nil
 }
 
@@ -320,6 +369,11 @@ func Remove(args []string) error {
 			found = true
 		}
 	}
+	for _, x := range cfg.Managed.Expose {
+		if x.Name == name {
+			found = true
+		}
+	}
 	if !found {
 		return clierr.Wrap(clierr.EXUsage, "unknown or manual connection "+name, nil, "cove list", nil)
 	}
@@ -327,6 +381,14 @@ func Remove(args []string) error {
 		return clierr.Wrap(clierr.EXUsage, "remove was not confirmed", nil, "rerun with --yes", err)
 	}
 	if err := commitManaged(context.Background(), func(m *config.ManagedConfig) error {
+		if name == "codex-login" {
+			for _, host := range []string{"chatgpt.com", "auth.openai.com"} {
+				blockPresentBase(cfg, m, "allow", host)
+			}
+			m.Expose = removeExposeNames(m.Expose, name)
+			m.Allow = removeAllowNames(m.Allow, "codex-login-chatgpt", "codex-login-auth")
+			return nil
+		}
 		for _, x := range m.Inject {
 			if x.Name == name {
 				blockPresentBase(cfg, m, "allow", x.Host)
@@ -340,6 +402,7 @@ func Remove(args []string) error {
 		}
 		m.Inject = removeInjectNames(m.Inject, name)
 		m.Allow = removeAllowNames(m.Allow, name)
+		m.Expose = removeExposeNames(m.Expose, name)
 		return nil
 	}); err != nil {
 		return err

@@ -64,7 +64,13 @@ func DecodeDocument(path string, data []byte) (*Document, error) {
 		verr := validationError(data, err)
 		return nil, clierr.Wrap(clierr.EXConfig, "could not load the policy", semanticLocation(path, data, verr), "cove config edit", verr)
 	}
-	return &Document{Path: path, Bytes: append([]byte(nil), data...), Meta: meta, Raw: raw, Config: cfg}, nil
+	doc := &Document{Path: path, Bytes: append([]byte(nil), data...), Meta: meta, Raw: raw, Config: cfg}
+	if len(raw.Options.CredMount) != 0 {
+		for range raw.Options.CredMount {
+			doc.Diagnostics = append(doc.Diagnostics, Diagnostic{Location: legacyCredMountLocation(path, data), Message: "options.cred_mount is deprecated; use [[expose]] (fix: cove config edit)"})
+		}
+	}
+	return doc, nil
 }
 
 func validationError(data []byte, cause error) *ValidationError {
@@ -85,7 +91,14 @@ func validationError(data []byte, cause error) *ValidationError {
 }
 
 func configFromRaw(raw rawConfig) *Config {
-	cfg := &Config{Options: raw.Options.Options, Allow: raw.Allow, Inject: raw.Inject, SigV4: raw.SigV4, MTLS: raw.MTLS}
+	cfg := &Config{Options: raw.Options.Options, Allow: raw.Allow, Inject: raw.Inject, SigV4: raw.SigV4, MTLS: raw.MTLS, Expose: raw.Expose}
+	for _, legacy := range raw.Options.CredMount {
+		path, mode := legacy, "ro"
+		if strings.HasSuffix(path, ":rw") {
+			path, mode = strings.TrimSuffix(path, ":rw"), "rw"
+		}
+		cfg.Expose = append(cfg.Expose, ExposeStanza{Path: path, Mode: mode, Reason: "deprecated cred_mount"})
+	}
 	if len(cfg.Allow) == 0 && len(raw.Options.Allow) > 0 {
 		cfg.Allow = raw.Options.Allow
 	}
@@ -98,7 +111,7 @@ func configFromRaw(raw rawConfig) *Config {
 func compileRaw(raw rawConfig) (*Config, error) {
 	base := configFromRaw(raw)
 	m := raw.Managed
-	if m.Version == 0 && len(m.Allow)+len(m.Block)+len(m.Inject)+len(m.SigV4)+len(m.MTLS) == 0 {
+	if m.Version == 0 && len(m.Allow)+len(m.Block)+len(m.Inject)+len(m.SigV4)+len(m.MTLS)+len(m.Expose) == 0 {
 		return base, nil
 	}
 	if m.Version != 1 {
@@ -131,6 +144,11 @@ func compileRaw(raw rawConfig) (*Config, error) {
 		}
 	}
 	for _, x := range m.MTLS {
+		if err := name(x.Name); err != nil {
+			return nil, err
+		}
+	}
+	for _, x := range m.Expose {
 		if err := name(x.Name); err != nil {
 			return nil, err
 		}
@@ -257,8 +275,18 @@ func compileRaw(raw rawConfig) (*Config, error) {
 	base.Inject = append(base.Inject, m.Inject...)
 	base.SigV4 = append(base.SigV4, m.SigV4...)
 	base.MTLS = append(base.MTLS, m.MTLS...)
-	base.Managed = ManagedConfig{Version: m.Version, Allow: m.Allow, Block: m.Block, Inject: m.Inject, SigV4: m.SigV4, MTLS: m.MTLS}
+	base.Expose = append(base.Expose, m.Expose...)
+	base.Managed = ManagedConfig{Version: m.Version, Allow: m.Allow, Block: m.Block, Inject: m.Inject, SigV4: m.SigV4, MTLS: m.MTLS, Expose: m.Expose}
 	return base, nil
+}
+
+func legacyCredMountLocation(path string, data []byte) *clierr.Location {
+	for i, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "cred_mount") {
+			return &clierr.Location{Path: path, Line: i + 1, Column: 1}
+		}
+	}
+	return nil
 }
 
 // semanticLocation uses TOML's already-decoded document only for presentation.

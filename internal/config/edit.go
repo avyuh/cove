@@ -57,11 +57,29 @@ func EditManagedConfigPath(ctx context.Context, path string, mutate func(*Manage
 }
 
 func managedFromRaw(m rawManaged) ManagedConfig {
-	return ManagedConfig{Version: m.Version, Allow: m.Allow, Block: m.Block, Inject: m.Inject, SigV4: m.SigV4, MTLS: m.MTLS}
+	return ManagedConfig{Version: m.Version, Allow: m.Allow, Block: m.Block, Inject: m.Inject, SigV4: m.SigV4, MTLS: m.MTLS, Expose: m.Expose}
 }
 
 func rawFromManaged(m ManagedConfig) rawManaged {
-	return rawManaged{Version: m.Version, Allow: m.Allow, Block: m.Block, Inject: m.Inject, SigV4: m.SigV4, MTLS: m.MTLS}
+	return rawManaged{Version: m.Version, Allow: m.Allow, Block: m.Block, Inject: m.Inject, SigV4: m.SigV4, MTLS: m.MTLS, Expose: m.Expose}
+}
+
+// AddManagedExpose atomically adds or replaces a named credential exposure.
+func AddManagedExpose(ctx context.Context, stanza ExposeStanza) error {
+	if stanza.Name == "" {
+		return errors.New("managed expose requires a name")
+	}
+	return EditManagedConfig(ctx, func(m *ManagedConfig) error {
+		m.Version = 1
+		for i := range m.Expose {
+			if m.Expose[i].Name == stanza.Name {
+				m.Expose[i] = stanza
+				return nil
+			}
+		}
+		m.Expose = append(m.Expose, stanza)
+		return nil
+	})
 }
 
 // AddManagedInject atomically adds or replaces a named managed inject policy.
@@ -111,8 +129,18 @@ func RemoveManagedByNamePath(ctx context.Context, path, name string) error {
 		m.Inject = removeNamedInject(m.Inject, name)
 		m.SigV4 = removeNamedSigV4(m.SigV4, name)
 		m.MTLS = removeNamedMTLS(m.MTLS, name)
+		m.Expose = removeNamedExpose(m.Expose, name)
 		return nil
 	})
+}
+func removeNamedExpose(in []ExposeStanza, name string) []ExposeStanza {
+	out := in[:0]
+	for _, x := range in {
+		if x.Name != name {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 func removeNamedAllow(in []NamedAllow, name string) []NamedAllow {

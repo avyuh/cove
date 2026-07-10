@@ -18,6 +18,7 @@ type Config struct {
 	Inject  []InjectStanza `toml:"inject"`
 	SigV4   []SigV4Stanza  `toml:"sigv4"`
 	MTLS    []MTLSStanza   `toml:"mtls"`
+	Expose  []ExposeStanza `toml:"expose"`
 	Managed ManagedConfig  `toml:"managed"`
 
 	AllowRules []AllowRule `toml:"-"`
@@ -30,6 +31,13 @@ type Options struct {
 	CredMount      []string `toml:"cred_mount"`
 	RuntimeMount   []string `toml:"runtime_mount"`
 	EnvPassthrough []string `toml:"env_passthrough"`
+}
+
+type ExposeStanza struct {
+	Name   string `toml:"name"`
+	Path   string `toml:"path"`
+	Mode   string `toml:"mode"`
+	Reason string `toml:"reason"`
 }
 
 type InjectStanza struct {
@@ -112,6 +120,7 @@ type rawConfig struct {
 	Inject  []InjectStanza `toml:"inject"`
 	SigV4   []SigV4Stanza  `toml:"sigv4"`
 	MTLS    []MTLSStanza   `toml:"mtls"`
+	Expose  []ExposeStanza `toml:"expose"`
 	Managed rawManaged     `toml:"managed"`
 }
 
@@ -124,6 +133,7 @@ type ManagedConfig struct {
 	Inject  []InjectStanza
 	SigV4   []SigV4Stanza
 	MTLS    []MTLSStanza
+	Expose  []ExposeStanza
 }
 
 type rawManaged struct {
@@ -133,6 +143,7 @@ type rawManaged struct {
 	Inject  []InjectStanza `toml:"inject"`
 	SigV4   []SigV4Stanza  `toml:"sigv4"`
 	MTLS    []MTLSStanza   `toml:"mtls"`
+	Expose  []ExposeStanza `toml:"expose"`
 }
 
 type NamedAllow struct {
@@ -216,6 +227,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("proxy_port must be >=1024; the shim binds it after CAP_NET_BIND_SERVICE is dropped")
 	}
 	if err := validateCredMounts(c.Options.CredMount); err != nil {
+		return err
+	}
+	if err := validateExposes(c.Expose); err != nil {
 		return err
 	}
 	if err := validateRuntimeMounts(c.Options.RuntimeMount); err != nil {
@@ -849,6 +863,27 @@ func validateCredMounts(entries []string) error {
 		if path == "" || path == "*" || clean == "." || clean == "~" || clean == "/" || strings.Contains(path, "*") {
 			return fmt.Errorf("cred_mount %q is too broad", e)
 		}
+	}
+	return nil
+}
+
+func validateExposes(entries []ExposeStanza) error {
+	seen := map[string]string{}
+	for _, e := range entries {
+		if e.Path == "" || e.Reason == "" {
+			return fmt.Errorf("expose %q requires path and reason", e.Name)
+		}
+		if e.Mode != "ro" && e.Mode != "rw" {
+			return fmt.Errorf("expose %q mode must be ro or rw", e.Path)
+		}
+		if err := validateCredMounts([]string{e.Path}); err != nil {
+			return fmt.Errorf("expose %q: %w", e.Path, err)
+		}
+		key := filepath.Clean(strings.TrimPrefix(e.Path, "~/"))
+		if prior, ok := seen[key]; ok {
+			return fmt.Errorf("duplicate expose path %q has conflicting modes %s and %s", e.Path, prior, e.Mode)
+		}
+		seen[key] = e.Mode
 	}
 	return nil
 }

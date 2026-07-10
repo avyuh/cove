@@ -284,7 +284,7 @@ func buildDirectives(cfg *config.Config, opts Opts, project, proxySock string) (
 			}
 		}
 	}
-	creds, err := parseCredMounts(cfg.Options.CredMount, !opts.DryRun)
+	creds, err := parseExposes(cfg.Expose, !opts.DryRun)
 	if err != nil {
 		return box.Directives{}, err
 	}
@@ -687,15 +687,23 @@ func sanitizeAgent(agent string) string {
 }
 
 func parseCredMounts(entries []string, warn bool) ([]box.CredMount, error) {
+	exposes := make([]config.ExposeStanza, 0, len(entries))
+	for _, entry := range entries {
+		path, mode := entry, "ro"
+		if strings.HasSuffix(path, ":rw") {
+			path, mode = strings.TrimSuffix(path, ":rw"), "rw"
+		}
+		exposes = append(exposes, config.ExposeStanza{Path: path, Mode: mode, Reason: "deprecated cred_mount"})
+	}
+	return parseExposes(exposes, warn)
+}
+
+func parseExposes(entries []config.ExposeStanza, warn bool) ([]box.CredMount, error) {
 	home, _ := os.UserHomeDir()
 	var out []box.CredMount
 	for _, e := range entries {
-		rw := false
-		path := e
-		if strings.HasSuffix(e, ":rw") {
-			rw = true
-			path = strings.TrimSuffix(e, ":rw")
-		}
+		rw := e.Mode == "rw"
+		path := e.Path
 		if strings.HasPrefix(path, "~/") {
 			path = filepath.Join(home, strings.TrimPrefix(path, "~/"))
 		}
@@ -708,11 +716,11 @@ func parseCredMounts(entries []string, warn bool) ([]box.CredMount, error) {
 		}
 		rel, err := filepath.Rel(home, abs)
 		if err != nil || strings.HasPrefix(rel, "..") || rel == "." {
-			return nil, fmt.Errorf("cred_mount %q must be under HOME", e)
+			return nil, fmt.Errorf("expose %q must be under HOME", e.Path)
 		}
 		if _, err := os.Stat(abs); err != nil {
 			if warn {
-				fmt.Fprintf(os.Stderr, "cove: warning: cred_mount %s does not exist; skipping\n", abs)
+				fmt.Fprintf(os.Stderr, "cove: warning: expose %s does not exist; skipping\n", abs)
 			}
 			continue
 		}
@@ -721,7 +729,11 @@ func parseCredMounts(entries []string, warn bool) ([]box.CredMount, error) {
 			mode = "read-write - UNSAFE under concurrent sessions"
 		}
 		if warn {
-			fmt.Fprintf(os.Stderr, "cove: credential %q is mounted INTO the box %s (exfil-contained, not theft-proof)\n", e, mode)
+			label := e.Path
+			if rw {
+				label += ":rw"
+			}
+			fmt.Fprintf(os.Stderr, "cove: credential %q is mounted INTO the box %s (exfil-contained, not theft-proof)\n", label, mode)
 		}
 		out = append(out, box.CredMount{Source: abs, Rel: rel, RW: rw})
 	}
