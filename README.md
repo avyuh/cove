@@ -14,7 +14,7 @@ first place.
 
 ## How it works
 
-`cove -- <agent>` runs the agent in an ephemeral Linux namespace box
+`cove <agent>` runs the agent in an ephemeral Linux namespace box
 (user/mount/pid/net — unprivileged, no root, no Docker, no daemon to manage).
 Three mechanisms:
 
@@ -68,13 +68,14 @@ readiness checklist, including credential availability without printing values.
 ## Run
 
 ```sh
-cove -- claude -p "summarize this repo"
-cove -C ~/src/app -- codex exec "run the tests"
-cove --dry-run -- claude     # print the launch plan, run nothing
+cove claude -p "summarize this repo"
+cove -C ~/src/app codex exec "run the tests"
+cove --dry-run claude        # print the launch plan, run nothing
 ```
 
-`cove -- <agent>` is a drop-in for `<agent>`: same TTY behavior, argv passed
-verbatim after `--`, the agent's own exit code propagated. The project (cwd, or
+`cove <agent>` is a drop-in for `<agent>`: same TTY behavior and verbatim agent
+argv. Use `cove -- <agent>` only when an agent name collides with a cove command.
+The agent's own exit code is propagated. The project (cwd, or
 `-C DIR`) appears read-write at `/work`, the agent's starting directory; edits
 are real host files owned by your uid. On exit the box is destroyed — nothing
 persists except `/work` and the audit log.
@@ -83,7 +84,7 @@ Agents installed via nvm, volta, or asdf are auto-resolved and their toolchain
 directory mounted read-only at its own absolute path; the rest of HOME stays
 absent. Agents installed under `/usr/local/bin` need nothing. Other cases:
 `runtime_mount` in the config. `-v` prints launcher diagnostics; `--no-audit`
-skips audit records for one run.
+disables audit records for one run (a denial receipt may still be shown after it exits).
 
 ## Credentials, per tool
 
@@ -126,13 +127,17 @@ cove log --follow --deny-only     # watch denials live
 cove log --session 1a2b3c4d --host api.anthropic.com
 ```
 
+On a terminal, `cove log` is a compact protected/allowed/blocked table. In a
+pipe, or with `--json`, it preserves the original JSONL bytes for scripts.
 Flags compose. The log is JSONL at `~/.local/state/cove/audit.log`
 (`$XDG_STATE_HOME` respected); `--follow` survives rotation and truncation;
 half-written trailing lines are skipped.
 
 ## Config
 
-`~/.config/cove/config.toml`. Adding a tool is config, not code.
+`~/.config/cove/config.toml`. Adding a tool is config, not code. `cove` commands
+write only the marked COVE MANAGED block; everything outside those markers is
+preserved byte-for-byte.
 
 - `allow = [...]` — hosts the box may reach as opaque tunnels; whatever
   credential the agent holds is used as-is, exfil-contained by this list. Exact

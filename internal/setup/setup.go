@@ -27,24 +27,6 @@ import (
 	"cove/internal/status"
 )
 
-type setupError struct {
-	code int
-	msg  string
-}
-
-func (e setupError) Error() string {
-	return e.msg
-}
-
-func (e setupError) ExitCode() int {
-	return e.code
-}
-
-// CLIError is the temporary adapter for setup's legacy error carrier.
-func (e setupError) CLIError() *clierr.Error {
-	return clierr.Wrap(e.code, e.msg, nil, "cove setup", e)
-}
-
 type invokingUser struct {
 	UID      int
 	GID      int
@@ -60,7 +42,7 @@ func Run(args []string) error {
 	help := fs.Bool("help", false, "show help")
 	verbose := fs.Bool("verbose", false, "show setup details")
 	if err := fs.Parse(args); err != nil {
-		return setupError{code: 64, msg: err.Error()}
+		return clierr.Wrap(clierr.EXUsage, "invalid setup option", nil, "cove help setup", err)
 	}
 	if *help {
 		fmt.Fprintln(os.Stderr, "usage: cove setup")
@@ -99,7 +81,7 @@ func Run(args []string) error {
 		notes = append(notes, "loaded AppArmor userns profile")
 	}
 	if err := probeUsernsAs(u, exe); err != nil {
-		return setupError{code: 77, msg: fmt.Sprintf("cove setup: userns probe still fails after setup: %v", err)}
+		return clierr.Wrap(clierr.EXNoPerm, "user namespaces are unavailable after setup", nil, "cove setup", err)
 	}
 
 	configPath := filepath.Join(u.Home, ".config", "cove", "config.toml")
@@ -155,7 +137,7 @@ func credentialPostureLines(cfg *config.Config) []string {
 
 func ApparmorOnly() error {
 	if os.Geteuid() != 0 {
-		return setupError{code: 77, msg: "cove __apparmor must run as root"}
+		return clierr.Wrap(clierr.EXNoPerm, "AppArmor setup requires root", nil, "cove setup", nil)
 	}
 	exe, err := os.Executable()
 	if err != nil {
@@ -450,7 +432,7 @@ func runAppArmorStep(exe string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return setupError{code: 77, msg: fmt.Sprintf("failed to install AppArmor profile: %v", err)}
+		return clierr.Wrap(clierr.EXNoPerm, "failed to install AppArmor profile", nil, "cove setup", err)
 	}
 	return nil
 }

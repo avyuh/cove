@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -203,11 +202,7 @@ func launcherMain(inv Invocation) int {
 		Version:   version.Version,
 	})
 	if err != nil {
-		var exitErr launcher.ExitError
-		if errors.As(err, &exitErr) {
-			return clierr.Print(os.Stderr, exitErr.CLIError())
-		}
-		return clierr.Print(os.Stderr, clierr.Wrap(code, "could not start the agent", nil, "cove status", err))
+		return clierr.Print(os.Stderr, err)
 	}
 	return code
 }
@@ -241,10 +236,6 @@ func usageError(what string) error {
 func exitFor(err error) int {
 	if err == nil {
 		return 0
-	}
-	var adapted interface{ CLIError() *clierr.Error }
-	if errors.As(err, &adapted) {
-		return clierr.Print(os.Stderr, adapted.CLIError())
 	}
 	return clierr.Print(os.Stderr, err)
 }

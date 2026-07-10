@@ -1,6 +1,8 @@
 package launcher
 
 import (
+	"cove/internal/clierr"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -31,22 +33,26 @@ func TestDryRunCredentialPostureDoesNotResolveSecrets(t *testing.T) {
 		}},
 	}
 
+	proj := t.TempDir()
 	report := captureStdout(t, func() {
-		code, err := Run(cfg, Opts{DryRun: true, Project: "demo", AgentArgv: []string{"agent"}})
+		code, err := Run(cfg, Opts{DryRun: true, Project: proj, AgentArgv: []string{"agent"}})
 		if err != nil || code != 0 {
 			t.Fatalf("Run() = (%d, %v), want (0, nil)", code, err)
 		}
 	})
-	for _, want := range []string{"credential source: inject", "credential source: sigv4", "credential source: mtls", ref, "issuer=human:security-ceremony", "bootstrap_ref=human:yubikey-slot-9a", "bootstrap/issuer: not recorded"} {
+	// The humanized dry-run (architecture §11.1) shows a credential summary, not
+	// individual refs or values. It must never print the resolved secret value,
+	// and per the design it does not print the secret ref path either.
+	for _, want := range []string{"Would start", "Credentials:", "protected", "Network:", "Audit:"} {
 		if !strings.Contains(report, want) {
 			t.Errorf("report missing %q:\n%s", want, report)
 		}
 	}
-	if got := strings.Count(report, "bootstrap/issuer: not recorded"); got != 2 {
-		t.Errorf("missing metadata warnings = %d, want 2 (only unrecorded stanzas)", got)
-	}
 	if strings.Contains(report, secretValue) {
 		t.Fatalf("report leaked resolved secret value: %q", report)
+	}
+	if strings.Contains(report, ref) {
+		t.Errorf("report printed a secret ref (should show only a summary):\n%s", report)
 	}
 }
 
@@ -98,12 +104,13 @@ func TestInitStatusFailureMapsAgentNotFoundTo127(t *testing.T) {
 	if code != 127 {
 		t.Fatalf("code = %d, want 127", code)
 	}
-	exitErr, ok := err.(ExitError)
+	ce := new(clierr.Error)
+	ok := errors.As(err, &ce)
 	if !ok {
-		t.Fatalf("err = %T, want ExitError", err)
+		t.Fatalf("err = %T, want *clierr.Error", err)
 	}
-	if exitErr.Code != 127 {
-		t.Fatalf("ExitError.Code = %d, want 127", exitErr.Code)
+	if ce.Code != 127 {
+		t.Fatalf("clierr.Error.Code = %d, want 127", ce.Code)
 	}
 }
 
@@ -112,12 +119,13 @@ func TestInitStatusFailureMapsSetupFailureTo75(t *testing.T) {
 	if code != 75 {
 		t.Fatalf("code = %d, want 75", code)
 	}
-	exitErr, ok := err.(ExitError)
+	ce := new(clierr.Error)
+	ok := errors.As(err, &ce)
 	if !ok {
-		t.Fatalf("err = %T, want ExitError", err)
+		t.Fatalf("err = %T, want *clierr.Error", err)
 	}
-	if exitErr.Code != 75 {
-		t.Fatalf("ExitError.Code = %d, want 75", exitErr.Code)
+	if ce.Code != 75 {
+		t.Fatalf("clierr.Error.Code = %d, want 75", ce.Code)
 	}
 }
 
@@ -162,15 +170,16 @@ func TestPreflightUsernsProbeFailureReturns77Guidance(t *testing.T) {
 	}
 
 	err := preflightUserns()
-	exitErr, ok := err.(ExitError)
+	ce := new(clierr.Error)
+	ok := errors.As(err, &ce)
 	if !ok {
-		t.Fatalf("err = %T, want ExitError", err)
+		t.Fatalf("err = %T, want *clierr.Error", err)
 	}
-	if exitErr.Code != 77 {
-		t.Fatalf("ExitError.Code = %d, want 77", exitErr.Code)
+	if ce.Code != 77 {
+		t.Fatalf("clierr.Error.Code = %d, want 77", ce.Code)
 	}
-	if !strings.Contains(exitErr.Msg, "run `cove setup`") {
-		t.Fatalf("guidance missing from error: %q", exitErr.Msg)
+	if !strings.Contains(ce.What+" "+ce.Fix, "cove setup") {
+		t.Fatalf("guidance missing from error: %q", ce.What+" "+ce.Fix)
 	}
 }
 
@@ -189,7 +198,7 @@ func TestParseCredMounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.Stderr = stderrW
-	mounts, err := parseCredMounts([]string{"~/.config/gh", "relative/creds:rw"})
+	mounts, err := parseCredMounts([]string{"~/.config/gh", "relative/creds:rw"}, true)
 	_ = stderrW.Close()
 	os.Stderr = oldStderr
 	if err != nil {
@@ -215,7 +224,7 @@ func TestParseCredMounts(t *testing.T) {
 	if !strings.Contains(warning, "relative/creds:rw") || !strings.Contains(warning, "read-write") {
 		t.Fatalf("read-write warning missing cred_mount and mode: %q", warning)
 	}
-	if _, err := parseCredMounts([]string{filepath.Dir(home)}); err == nil {
+	if _, err := parseCredMounts([]string{filepath.Dir(home)}, true); err == nil {
 		t.Fatalf("expected outside-HOME cred_mount rejection")
 	}
 }

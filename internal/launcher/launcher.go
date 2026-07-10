@@ -38,9 +38,12 @@ type Opts struct {
 	Version   string
 }
 
-type ExitError struct {
-	Code int
-	Msg  string
+// Plan is the pure, side-effect-free portion of a launch.
+type Plan struct {
+	Project                         string
+	Directives                      box.Directives
+	Audit                           bool
+	Allowed, Protected, Credentials int
 }
 
 // ProxySession owns the REGISTER/2 control stream. Its reader is deliberately
@@ -55,7 +58,7 @@ type ProxySession struct {
 	done   chan struct{}
 }
 
-const usernsDeniedMessage = "cove: user namespaces denied; run `cove setup` (needs sudo, once)"
+const usernsDeniedMessage = "user namespaces are unavailable"
 
 var (
 	probeUsernsSelf = setup.ProbeUsernsSelf
@@ -68,26 +71,18 @@ var sigV4DummyEnv = map[string]string{
 	"AWS_EC2_METADATA_DISABLED": "true",
 }
 
-func (e ExitError) Error() string {
-	return e.Msg
-}
-
-// CLIError is the temporary adapter for the legacy launcher error carrier.
-func (e ExitError) CLIError() *clierr.Error {
-	return clierr.Wrap(e.Code, e.Msg, nil, "cove status", e)
-}
-
 func Run(cfg *config.Config, opts Opts) (int, error) {
 	if opts.DryRun {
-		fmt.Printf("project=%s proxy_port=%d agent=%q\n", opts.Project, cfg.Options.ProxyPort, opts.AgentArgv)
-		for _, line := range setup.CredentialPostureLines(cfg) {
-			fmt.Println(line)
+		plan, err := BuildPlan(cfg, opts)
+		if err != nil {
+			return clierrCode(err), err
 		}
+		RenderPlan(os.Stdout, plan, opts.Verbose)
 		return 0, nil
 	}
 	project, err := resolveProject(opts.Project)
 	if err != nil {
-		return 66, ExitError{Code: 66, Msg: err.Error()}
+		return clierr.EXNoInput, clierr.Wrap(clierr.EXNoInput, "could not use the project directory", nil, "cove -C /existing/path AGENT", err)
 	}
 	if err := preflightUserns(); err != nil {
 		return 77, err
@@ -98,7 +93,7 @@ func Run(cfg *config.Config, opts Opts) (int, error) {
 	auditEnabled := cfg.Options.Audit && !opts.NoAudit
 	session, meta, stored, err := ensureProxySession(opts.AgentArgv[0], auditEnabled, project)
 	if err != nil {
-		return 69, ExitError{Code: 69, Msg: "cove proxy unavailable: " + err.Error()}
+		return clierr.EXUnavailable, clierr.Wrap(clierr.EXUnavailable, "proxy unavailable", nil, "cove status", err)
 	}
 	defer session.Conn.Close()
 	store := sessionStore()
@@ -114,6 +109,96 @@ func Run(cfg *config.Config, opts Opts) (int, error) {
 		fmt.Fprintln(os.Stderr, "denial receipt unavailable")
 	}
 	return code, err
+}
+
+// BuildPlan validates launch inputs without starting the proxy, claiming grants,
+// creating session metadata, probing user namespaces, or reading secret values.
+func BuildPlan(cfg *config.Config, opts Opts) (Plan, error) {
+	if cfg == nil {
+		return Plan{}, clierr.Wrap(clierr.EXConfig, "could not load the policy", nil, "cove config edit", errors.New("nil config"))
+	}
+	if len(opts.AgentArgv) == 0 {
+		return Plan{}, clierr.Wrap(clierr.EXUsage, "missing agent", nil, "cove help", nil)
+	}
+	project, err := resolveProject(opts.Project)
+	if err != nil {
+		return Plan{}, clierr.Wrap(clierr.EXNoInput, "could not use the project directory", nil, "cove -C /existing/path AGENT", err)
+	}
+	d, err := buildDirectives(cfg, opts, project, "")
+	if err != nil {
+		return Plan{}, clierr.Wrap(clierr.EXConfig, "could not build the launch plan", nil, "cove config edit", err)
+	}
+	p := Plan{Project: project, Directives: d, Audit: cfg.Options.Audit && !opts.NoAudit, Allowed: len(cfg.Allow), Protected: len(cfg.Inject) + len(cfg.SigV4) + len(cfg.MTLS)}
+	for _, s := range cfg.Inject {
+		if credentialAvailable(s.Secret) {
+			p.Credentials++
+		}
+	}
+	for _, s := range cfg.SigV4 {
+		if credentialAvailable(s.AccessKeyID) && credentialAvailable(s.SecretAccessKey) {
+			p.Credentials++
+		}
+	}
+	for _, s := range cfg.MTLS {
+		if credentialAvailable(s.ClientCert) && credentialAvailable(s.ClientKey) {
+			p.Credentials++
+		}
+	}
+	return p, nil
+}
+
+func clierrCode(err error) int {
+	var ce *clierr.Error
+	if errors.As(err, &ce) {
+		return ce.ExitCode()
+	}
+	return 1
+}
+
+// credentialAvailable only inspects metadata. It deliberately never resolves a
+// reference, because dry-run output must not cause a secret read.
+func credentialAvailable(ref string) bool {
+	path := ""
+	if p, ok := strings.CutPrefix(ref, "file:"); ok {
+		path = p
+	}
+	if p, ok := strings.CutPrefix(ref, "json:"); ok {
+		path, _, _ = strings.Cut(p, "#")
+	}
+	if path == "" {
+		return false
+	}
+	st, err := os.Stat(path)
+	return err == nil && st.Mode().IsRegular() && st.Size() > 0
+}
+
+func RenderPlan(w io.Writer, p Plan, verbose bool) {
+	fmt.Fprintf(w, "Would start: %s\nProject:     %s -> /work (read-write)\nHome:        empty tmpfs\n", quoteArgv(p.Directives.AgentArgv), p.Project)
+	fmt.Fprintf(w, "Credentials: %d protected connection(s) available; values stay host-side\nNetwork:     %d allowed, %d protected, everything else blocked\n", p.Credentials, p.Allowed, p.Protected)
+	if p.Audit {
+		fmt.Fprintln(w, "Audit:       on")
+	} else {
+		fmt.Fprintln(w, "Audit:       off")
+	}
+	if verbose {
+		for _, m := range p.Directives.RuntimeMount {
+			fmt.Fprintf(w, "Runtime:     %s (read-only)\n", m)
+		}
+	}
+}
+
+func quoteArgv(argv []string) string {
+	out := make([]string, len(argv))
+	for i, s := range argv {
+		out[i] = posixQuote(s)
+	}
+	return strings.Join(out, " ")
+}
+func posixQuote(s string) string {
+	if s != "" && !strings.ContainsAny(s, " \t\n'\"\\$`!&;|<>()[]{}*?~") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func resolveProject(project string) (string, error) {
@@ -135,9 +220,13 @@ func resolveProject(project string) (string, error) {
 }
 
 func buildDirectives(cfg *config.Config, opts Opts, project, proxySock string) (box.Directives, error) {
-	ca, err := os.ReadFile(filepath.Join(config.ConfigDir(), "ca.pem"))
-	if err != nil {
-		return box.Directives{}, fmt.Errorf("read cove CA: %w", err)
+	var ca []byte
+	var err error
+	if !opts.DryRun {
+		ca, err = os.ReadFile(filepath.Join(config.ConfigDir(), "ca.pem"))
+		if err != nil {
+			return box.Directives{}, fmt.Errorf("read cove CA: %w", err)
+		}
 	}
 	bundle, err := os.ReadFile("/etc/ssl/certs/ca-certificates.crt")
 	if err != nil {
@@ -195,7 +284,7 @@ func buildDirectives(cfg *config.Config, opts Opts, project, proxySock string) (
 			}
 		}
 	}
-	creds, err := parseCredMounts(cfg.Options.CredMount)
+	creds, err := parseCredMounts(cfg.Options.CredMount, !opts.DryRun)
 	if err != nil {
 		return box.Directives{}, err
 	}
@@ -204,7 +293,9 @@ func buildDirectives(cfg *config.Config, opts Opts, project, proxySock string) (
 		return box.Directives{}, err
 	}
 	for _, m := range runtimeMounts {
-		fmt.Fprintf(os.Stderr, "cove: runtime %s is mounted INTO the box read-only at the same path\n", m)
+		if !opts.DryRun {
+			fmt.Fprintf(os.Stderr, "cove: runtime %s is mounted INTO the box read-only at the same path\n", m)
+		}
 	}
 	return box.Directives{
 		Project:        project,
@@ -311,7 +402,7 @@ func spawnInit(d box.Directives, verbose bool) (int, error) {
 	line, err := bufio.NewReader(statusR).ReadString('\n')
 	if err != nil {
 		_ = cmd.Wait()
-		return 75, ExitError{Code: 75, Msg: "cove: box setup failed before status"}
+		return 75, clierr.Wrap(clierr.EXTempFail, "box setup failed before status", nil, "cove status", err)
 	}
 	line = strings.TrimSpace(line)
 	if verbose {
@@ -351,8 +442,8 @@ func preflightUserns() error {
 	return nil
 }
 
-func usernsDeniedError() ExitError {
-	return ExitError{Code: 77, Msg: usernsDeniedMessage}
+func usernsDeniedError() error {
+	return clierr.Wrap(clierr.EXNoPerm, usernsDeniedMessage, nil, "cove setup", nil)
 }
 
 func initStatusFailure(line string) (int, error) {
@@ -364,9 +455,9 @@ func initStatusFailure(line string) (int, error) {
 		if agent == "" {
 			agent = "agent"
 		}
-		return 127, ExitError{Code: 127, Msg: "cove: agent '" + strings.ReplaceAll(agent, "'", "'\\''") + "' not found in box PATH"}
+		return 127, clierr.Wrap(127, "agent not found in box PATH", nil, "cove status", nil)
 	}
-	return 75, ExitError{Code: 75, Msg: "cove: box setup failed: " + line}
+	return 75, clierr.Wrap(clierr.EXTempFail, "box setup failed", nil, "cove status", errors.New(line))
 }
 
 func ensureProxySession(agentPath string, audit bool, project string) (*ProxySession, session.Metadata, bool, error) {
@@ -595,7 +686,7 @@ func sanitizeAgent(agent string) string {
 	return agent
 }
 
-func parseCredMounts(entries []string) ([]box.CredMount, error) {
+func parseCredMounts(entries []string, warn bool) ([]box.CredMount, error) {
 	home, _ := os.UserHomeDir()
 	var out []box.CredMount
 	for _, e := range entries {
@@ -620,14 +711,18 @@ func parseCredMounts(entries []string) ([]box.CredMount, error) {
 			return nil, fmt.Errorf("cred_mount %q must be under HOME", e)
 		}
 		if _, err := os.Stat(abs); err != nil {
-			fmt.Fprintf(os.Stderr, "cove: warning: cred_mount %s does not exist; skipping\n", abs)
+			if warn {
+				fmt.Fprintf(os.Stderr, "cove: warning: cred_mount %s does not exist; skipping\n", abs)
+			}
 			continue
 		}
 		mode := "read-only"
 		if rw {
 			mode = "read-write - UNSAFE under concurrent sessions"
 		}
-		fmt.Fprintf(os.Stderr, "cove: credential %q is mounted INTO the box %s (exfil-contained, not theft-proof)\n", e, mode)
+		if warn {
+			fmt.Fprintf(os.Stderr, "cove: credential %q is mounted INTO the box %s (exfil-contained, not theft-proof)\n", e, mode)
+		}
 		out = append(out, box.CredMount{Source: abs, Rel: rel, RW: rw})
 	}
 	return out, nil

@@ -63,6 +63,9 @@ Launcher flags:
 
 Verdicts: protected / allowed / blocked correspond to inject / allow / deny in
 machine-readable configuration and JSONL.
+
+Exit codes: 64 usage, 66 input, 69 unavailable, 73 create, 74 I/O,
+75 temporary, 77 permission, 78 config, 126 cannot execute, 127 not found.
 `
 
 var commandHelp = map[string]string{
