@@ -65,8 +65,11 @@ type InjectStanza struct {
 }
 
 type SigV4Stanza struct {
-	Name              string   `toml:"name"`
-	Host              string   `toml:"host"`
+	Name string `toml:"name"`
+	Host string `toml:"host"`
+	// Profile delegates credential refresh to the AWS SDK on the host. It is
+	// deliberately an alternative to file/env secret refs, never an addition.
+	Profile           string   `toml:"profile"`
 	AccessKeyID       string   `toml:"access_key_id"`
 	SecretAccessKey   string   `toml:"secret_access_key"`
 	SessionToken      string   `toml:"session_token"`
@@ -476,14 +479,20 @@ func validateSigV4Stanza(st *SigV4Stanza, r AllowRule) error {
 	if !accountIDPattern.MatchString(st.AccountID) {
 		return fmt.Errorf("sigv4 %q account_id must be a 12-digit value", st.Host)
 	}
-	if st.AccessKeyID == "" || !validSecretRef(st.AccessKeyID) {
-		return fmt.Errorf("sigv4 %q missing or invalid access_key_id", st.Host)
-	}
-	if st.SecretAccessKey == "" || !validSecretRef(st.SecretAccessKey) {
-		return fmt.Errorf("sigv4 %q missing or invalid secret_access_key", st.Host)
-	}
-	if st.SessionToken != "" && !validSecretRef(st.SessionToken) {
-		return fmt.Errorf("sigv4 %q has unsupported session_token ref %q", st.Host, st.SessionToken)
+	if st.Profile != "" {
+		if st.AccessKeyID != "" || st.SecretAccessKey != "" || st.SessionToken != "" {
+			return fmt.Errorf("sigv4 %q profile is exclusive with access_key_id, secret_access_key, and session_token", st.Host)
+		}
+	} else {
+		if st.AccessKeyID == "" || !validSecretRef(st.AccessKeyID) {
+			return fmt.Errorf("sigv4 %q missing or invalid access_key_id", st.Host)
+		}
+		if st.SecretAccessKey == "" || !validSecretRef(st.SecretAccessKey) {
+			return fmt.Errorf("sigv4 %q missing or invalid secret_access_key", st.Host)
+		}
+		if st.SessionToken != "" && !validSecretRef(st.SessionToken) {
+			return fmt.Errorf("sigv4 %q has unsupported session_token ref %q", st.Host, st.SessionToken)
+		}
 	}
 	if len(st.AllowedMethods) == 0 || len(st.AllowedOperations) == 0 || len(st.AllowedResources) == 0 {
 		return fmt.Errorf("sigv4 %q requires methods, operations, and resources", st.Host)

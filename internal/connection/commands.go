@@ -64,6 +64,9 @@ func Add(args []string) error {
 	if args[0] == "mtls" {
 		return addMTLS(args[1:])
 	}
+	if args[0] == "s3" {
+		return addS3(args[1:])
+	}
 	s, ok := services[args[0]]
 	if !ok {
 		return clierr.Wrap(clierr.EXUsage, "unknown service "+args[0], nil, "cove help add", nil)
@@ -75,6 +78,44 @@ func Add(args []string) error {
 		return clierr.Wrap(clierr.EXUsage, "invalid add option", nil, "cove help add", err)
 	}
 	return addService(s, *stdin, *yes)
+}
+
+func addS3(args []string) error {
+	if len(args) == 0 {
+		return clierr.Wrap(clierr.EXUsage, "s3 requires s3://BUCKET/PREFIX/", nil, "cove help add", nil)
+	}
+	uri := args[0]
+	fs := flag.NewFlagSet("cove add s3", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	readWrite := fs.Bool("read-write", false, "allow writes")
+	deleteObjects := fs.Bool("delete", false, "allow deletes")
+	profile := fs.String("profile", "", "AWS profile")
+	region := fs.String("region", "", "AWS region")
+	account := fs.String("account", "", "AWS account ID")
+	yes := fs.Bool("yes", false, "skip confirmation")
+	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 {
+		return clierr.Wrap(clierr.EXUsage, "invalid S3 option", nil, "cove help add", err)
+	}
+	cfg, err := config.Load("")
+	if err != nil {
+		return err
+	}
+	p, err := compileS3(uri, *profile, *region, *account, *readWrite, *deleteObjects, cfg)
+	if err != nil {
+		code := clierr.EXUsage
+		if strings.Contains(err.Error(), "could not infer AWS account") {
+			code = clierr.EXUnavailable
+		}
+		return clierr.Wrap(code, "cannot add S3", nil, "use --account 123456789012 when STS is unavailable", err)
+	}
+	if err := confirmMutation(previewS3Plan(p), *yes); err != nil {
+		return clierr.Wrap(clierr.EXUsage, "add was not confirmed", nil, "rerun with --yes", err)
+	}
+	if err := commitS3Plan(context.Background(), p); err != nil {
+		return err
+	}
+	fprint(commandOutput, "saved: "+p.Name+"\nundo: cove remove "+p.Name+"\n")
+	return nil
 }
 
 func addGitHub(args []string) error {

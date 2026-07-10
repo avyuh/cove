@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -761,7 +762,21 @@ func spoolAndHashBody(body io.ReadCloser, dir string, max int64) (io.ReadCloser,
 }
 
 func resolveAWSCredentials(cache *secret.Cache, stanza *config.SigV4Stanza) (aws.Credentials, error) {
-	if cache == nil || stanza == nil {
+	if stanza == nil {
+		return aws.Credentials{}, errors.New("credentials unavailable")
+	}
+	if stanza.Profile != "" {
+		cfg, err := secret.AWSProfile(context.Background(), stanza.Profile)
+		if err != nil {
+			return aws.Credentials{}, errors.New("profile unavailable")
+		}
+		creds, err := cfg.Credentials.Retrieve(context.Background())
+		if err != nil || !creds.HasKeys() {
+			return aws.Credentials{}, errors.New("profile credentials unavailable")
+		}
+		return creds, nil
+	}
+	if cache == nil {
 		return aws.Credentials{}, errors.New("credentials unavailable")
 	}
 	akid, err := cache.Resolve(stanza.AccessKeyID)

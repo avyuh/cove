@@ -1,6 +1,7 @@
 package secret
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,9 +10,22 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 )
 
 var ErrNotImplemented = errors.New("secret backend not implemented")
+
+// AWSProfile loads one SDK credential provider. Callers retrieve its complete
+// credential triple in one call, so a rotating profile cannot mix generations.
+func AWSProfile(ctx context.Context, profile string) (aws.Config, error) {
+	opts := []func(*awsconfig.LoadOptions) error{}
+	if profile != "" {
+		opts = append(opts, awsconfig.WithSharedConfigProfile(profile))
+	}
+	return awsconfig.LoadDefaultConfig(ctx, opts...)
+}
 
 // Availability deliberately describes only whether a reference can be used. It
 // never carries secret material, making it safe for status output.

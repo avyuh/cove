@@ -295,6 +295,32 @@ func TestSigV4EndpointAndResourceValidation(t *testing.T) {
 	}
 }
 
+func TestSigV4ProfileExclusiveCredentialValidation(t *testing.T) {
+	profileOnly := strings.Replace(validSigV4("my-bucket.s3.us-east-1.amazonaws.com"), "access_key_id=\"env:ACCESS\"\nsecret_access_key=\"env:SECRET\"", "profile=\"named-profile\"", 1)
+	keysOnly := validSigV4("my-bucket.s3.us-east-1.amazonaws.com")
+	for name, body := range map[string]string{
+		"profile alone": profileOnly,
+		"keys alone":    keysOnly,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := LoadBytes([]byte(body)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	for _, field := range []string{"access_key_id=\"env:ACCESS\"", "secret_access_key=\"env:SECRET\"", "session_token=\"env:SESSION\""} {
+		t.Run("profile with "+strings.Split(field, "=")[0], func(t *testing.T) {
+			body := strings.Replace(profileOnly, "profile=\"named-profile\"", "profile=\"named-profile\"\n"+field, 1)
+			_, err := LoadBytes([]byte(body))
+			var cli *clierr.Error
+			if !errors.As(err, &cli) || cli.Code != clierr.EXConfig {
+				t.Fatalf("error = %#v, want EX_CONFIG", err)
+			}
+		})
+	}
+}
+
 func TestGitHubBasicValidation(t *testing.T) {
 	valid := validGitHubBasic()
 	if _, err := LoadBytes([]byte(valid)); err != nil {
