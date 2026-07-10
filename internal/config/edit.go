@@ -36,6 +36,122 @@ func EditManaged(ctx context.Context, mutate func(*rawManaged) error) error {
 	return EditManagedPath(ctx, DefaultPath(), mutate)
 }
 
+// EditManagedConfig is the exported managed-policy mutation boundary.  It is
+// deliberately the only way command packages can change the cove-owned TOML
+// namespace: the callback gets a copy of the public managed schema, while the
+// lock, candidate validation, and atomic replacement remain in this package.
+func EditManagedConfig(ctx context.Context, mutate func(*ManagedConfig) error) error {
+	return EditManagedConfigPath(ctx, DefaultPath(), mutate)
+}
+
+// EditManagedConfigPath is the path-explicit form of EditManagedConfig.
+func EditManagedConfigPath(ctx context.Context, path string, mutate func(*ManagedConfig) error) error {
+	return EditManagedPath(ctx, path, func(raw *rawManaged) error {
+		m := managedFromRaw(*raw)
+		if err := mutate(&m); err != nil {
+			return err
+		}
+		*raw = rawFromManaged(m)
+		return nil
+	})
+}
+
+func managedFromRaw(m rawManaged) ManagedConfig {
+	return ManagedConfig{Version: m.Version, Allow: m.Allow, Block: m.Block, Inject: m.Inject, SigV4: m.SigV4, MTLS: m.MTLS}
+}
+
+func rawFromManaged(m ManagedConfig) rawManaged {
+	return rawManaged{Version: m.Version, Allow: m.Allow, Block: m.Block, Inject: m.Inject, SigV4: m.SigV4, MTLS: m.MTLS}
+}
+
+// AddManagedInject atomically adds or replaces a named managed inject policy.
+// Names are required so later removal can leave a fail-closed tombstone.
+func AddManagedInject(ctx context.Context, stanza InjectStanza) error {
+	if stanza.Name == "" {
+		return errors.New("managed inject requires a name")
+	}
+	return EditManagedConfig(ctx, func(m *ManagedConfig) error {
+		m.Version = 1
+		for i := range m.Inject {
+			if m.Inject[i].Name == stanza.Name {
+				m.Inject[i] = stanza
+				return nil
+			}
+		}
+		m.Inject = append(m.Inject, stanza)
+		return nil
+	})
+}
+
+// BlockBasePolicy records a managed tombstone. Blocks only remove matching
+// user/base policy; candidate validation remains authoritative.
+func BlockBasePolicy(ctx context.Context, kind, host string) error {
+	return EditManagedConfig(ctx, func(m *ManagedConfig) error {
+		m.Version = 1
+		for _, b := range m.Block {
+			if b.Kind == kind && b.Host == host {
+				return nil
+			}
+		}
+		m.Block = append(m.Block, PolicyRef{Kind: kind, Host: host})
+		return nil
+	})
+}
+
+// RemoveManagedByName removes all managed policies bearing name in one atomic
+// config commit. It does not delete credential files.
+func RemoveManagedByName(ctx context.Context, name string) error {
+	return RemoveManagedByNamePath(ctx, DefaultPath(), name)
+}
+
+// RemoveManagedByNamePath is the path-explicit form of RemoveManagedByName.
+func RemoveManagedByNamePath(ctx context.Context, path, name string) error {
+	return EditManagedConfigPath(ctx, path, func(m *ManagedConfig) error {
+		m.Allow = removeNamedAllow(m.Allow, name)
+		m.Inject = removeNamedInject(m.Inject, name)
+		m.SigV4 = removeNamedSigV4(m.SigV4, name)
+		m.MTLS = removeNamedMTLS(m.MTLS, name)
+		return nil
+	})
+}
+
+func removeNamedAllow(in []NamedAllow, name string) []NamedAllow {
+	out := in[:0]
+	for _, x := range in {
+		if x.Name != name {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+func removeNamedInject(in []InjectStanza, name string) []InjectStanza {
+	out := in[:0]
+	for _, x := range in {
+		if x.Name != name {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+func removeNamedSigV4(in []SigV4Stanza, name string) []SigV4Stanza {
+	out := in[:0]
+	for _, x := range in {
+		if x.Name != name {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+func removeNamedMTLS(in []MTLSStanza, name string) []MTLSStanza {
+	out := in[:0]
+	for _, x := range in {
+		if x.Name != name {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
 // AddManagedAllow adds one cove-owned exact allow rule. It is intentionally a
 // narrow wrapper around EditManaged: command packages must not need access to
 // the editor's internal raw TOML representation.
@@ -346,4 +462,47 @@ func CreateIfAbsentAtomic(path string, value []byte) error {
 		return err
 	}
 	return f.Chmod(0600)
+}
+
+// WriteSecretAtomic replaces a host-side secret using a same-directory,
+// fsynced 0600 rename. It accepts no references or command-line strings; its
+// caller is responsible for obtaining value from the protected input channel.
+func WriteSecretAtomic(path string, value []byte) error {
+	if len(value) > 1<<20 {
+		return fmt.Errorf("secret exceeds 1 MiB limit")
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	tmp, err := os.OpenFile(filepath.Join(dir, ".secret.tmp-"+randomSuffix()), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(value); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }

@@ -10,6 +10,7 @@ import (
 	"cove/internal/box"
 	"cove/internal/clierr"
 	"cove/internal/config"
+	"cove/internal/configcmd"
 	"cove/internal/connection"
 	"cove/internal/help"
 	"cove/internal/launcher"
@@ -141,12 +142,12 @@ func isPublicCommand(name string) bool {
 var public = map[string]func([]string) error{
 	"setup":    setup.Run,
 	"status":   status.Run,
-	"add":      unavailable,
+	"add":      connection.Add,
 	"allow":    connection.Allow,
 	"remove":   unavailable,
-	"list":     unavailable,
+	"list":     connection.List,
 	"log":      logcmd.Run,
-	"config":   unavailable,
+	"config":   configcmd.Run,
 	"sessions": unavailable,
 	"explain":  unavailable,
 	"help":     help.Run,

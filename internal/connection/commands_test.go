@@ -13,6 +13,7 @@ import (
 
 	"cove/internal/clierr"
 	"cove/internal/config"
+	"cove/internal/prompt"
 	"cove/internal/proxy"
 )
 
@@ -169,5 +170,113 @@ func TestAllowDuplicatePersistentIsNoOp(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Fatal("duplicate persistent allow changed config")
+	}
+}
+
+func setupAddTest(t *testing.T) (*bytes.Buffer, string) {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	path := config.DefaultPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`[[inject]]
+host = "api.openai.com"
+header_name = "Authorization"
+header_template = "Bearer {secret}"
+secret = "file:/tmp/old"
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	oldOut, oldIn, oldConfirm, oldRead := commandOutput, commandInput, confirmMutation, readSecretStdin
+	out := new(bytes.Buffer)
+	commandOutput, commandInput = out, strings.NewReader("  synthetic-secret  \n")
+	confirmMutation = func(_ string, yes bool) error {
+		if !yes {
+			return errors.New("confirmation requires a TTY")
+		}
+		return nil
+	}
+	readSecretStdin = prompt.ReadSecretStdin
+	t.Cleanup(func() {
+		commandOutput, commandInput, confirmMutation, readSecretStdin = oldOut, oldIn, oldConfirm, oldRead
+	})
+	return out, path
+}
+
+func TestAddServiceSecretNeverAppearsInOutputAndBlocksSeed(t *testing.T) {
+	out, path := setupAddTest(t)
+	if err := Add([]string{"openai", "--secret-stdin", "--yes"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "synthetic-secret") {
+		t.Fatalf("secret leaked to output: %q", out.String())
+	}
+	secret, err := os.ReadFile(filepath.Join(config.ConfigDir(), "secrets", "openai-api-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(secret) != "synthetic-secret" {
+		t.Fatalf("secret write = %q", secret)
+	}
+	info, err := os.Stat(filepath.Join(config.ConfigDir(), "secrets", "openai-api-key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("secret mode = %o", info.Mode().Perm())
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Inject) != 1 || loaded.Inject[0].Name != "openai" {
+		t.Fatalf("effective inject = %+v", loaded.Inject)
+	}
+	if len(loaded.Managed.Block) != 1 || loaded.Managed.Block[0].Kind != "inject" {
+		t.Fatalf("seed inject was not blocked: %+v", loaded.Managed.Block)
+	}
+}
+
+func TestAddRejectsLiteralSecretWithoutEcho(t *testing.T) {
+	out, _ := setupAddTest(t)
+	err := Add([]string{"openai", "--token", "very-secret"})
+	var ce *clierr.Error
+	if !errors.As(err, &ce) || ce.Code != clierr.EXUsage {
+		t.Fatalf("error = %v", err)
+	}
+	if strings.Contains(ce.What+ce.Fix+out.String(), "very-secret") {
+		t.Fatal("literal secret echoed")
+	}
+}
+
+func TestAddRequiresYesWithoutTTY(t *testing.T) {
+	_, path := setupAddTest(t)
+	err := Add([]string{"openai", "--secret-stdin"})
+	var ce *clierr.Error
+	if !errors.As(err, &ce) || ce.Code != clierr.EXUsage {
+		t.Fatalf("error = %v", err)
+	}
+	body, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if strings.Contains(string(body), "BEGIN COVE MANAGED") {
+		t.Fatal("non-TTY add mutated config")
+	}
+}
+
+func TestListIsTabSeparatedAndDoesNotResolveSecret(t *testing.T) {
+	out, _ := setupAddTest(t)
+	if err := List(nil); err != nil {
+		t.Fatal(err)
+	}
+	line := out.String()
+	if !strings.Contains(line, "manual:inject:api.openai.com\tprotected\tapi.openai.com\tneeds a key") {
+		t.Fatalf("list = %q", line)
+	}
+	if strings.Contains(line, "/tmp/old") {
+		t.Fatal("list printed secret reference")
 	}
 }

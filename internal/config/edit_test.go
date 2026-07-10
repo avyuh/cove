@@ -100,6 +100,47 @@ func TestInvalidCandidateNeverCommits(t *testing.T) {
 	}
 }
 
+func TestExportedManagedMutationIsAtomicAndValidated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	initial := []byte("allow = [\"old.example.com\"]\n")
+	if err := os.WriteFile(path, initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := EditManagedConfigPath(context.Background(), path, func(m *ManagedConfig) error {
+		m.Version = 1
+		m.Inject = append(m.Inject, InjectStanza{Name: "bad", Host: "api.example.com", Secret: "file:/tmp/key"})
+		return nil
+	})
+	if err == nil {
+		t.Fatal("invalid exported mutation committed")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, initial) {
+		t.Fatalf("invalid mutation changed destination: %s", got)
+	}
+
+	if err := EditManagedConfigPath(context.Background(), path, func(m *ManagedConfig) error {
+		m.Version = 1
+		m.Inject = append(m.Inject, InjectStanza{Name: "openai", Host: "api.example.com", HeaderName: "Authorization", HeaderTemplate: "Bearer {secret}", Secret: "file:/tmp/key"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveManagedByNamePath(context.Background(), path, "openai"); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Managed.Inject) != 0 {
+		t.Fatalf("managed inject remained: %+v", loaded.Managed.Inject)
+	}
+}
+
 func TestCompileRawManagedBlockReplacesBasePolicy(t *testing.T) {
 	cfg, err := LoadBytes([]byte(`
 allow = ["api.example.com"]
