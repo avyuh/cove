@@ -1,0 +1,45 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+      - name: Test
+        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Build release artifacts
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: v2.12.7
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify checksums
+        run: (cd dist && sha256sum --check checksums.txt)
+      - name: Enable cross-architecture smoke tests
+        uses: docker/setup-qemu-action@v3
+      - name: Smoke-run release binaries
+        run: |
+          for arch in amd64 arm64; do
+            archive="dist/cove_${GITHUB_REF_NAME#v}_linux_${arch}.tar.gz"
+            mkdir -p ".smoke/${arch}"
+            tar -xzf "$archive" -C ".smoke/${arch}"
+            docker run --rm --platform "linux/${arch}" \
+              -v "$PWD/.smoke/${arch}:/release:ro" alpine:3.21 /release/cove --version
+          done

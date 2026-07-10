@@ -971,7 +971,7 @@ enables both commented stanzas.
 `allowed_methods`, `allowed_operations`, `allowed_resources`,
 `max_body_bytes`, and optional `allow_unsigned_payload`, `alpn`, and credential
 metadata. `[[mtls]]` requires exact `host`, `client_cert`, `client_key`,
-`allowed_methods`, `allowed_path_prefixes`, and optional `alpn` and metadata.
+`rules` (each `{ method, path_prefix }` pair), and optional `alpn` and metadata.
 Secret references are `file:`, `env:`, or `json:`; examples must never contain
 real values or `keyring:` references.
 
@@ -1371,11 +1371,12 @@ with NO containment mechanism would have been the DOA failure B4 flagged.
 
 Tiny by design. cove is not a session manager.
 
-### 6.1 `cove [flags] -- <agent> [args…]`
+### 6.1 `cove <agent> [args…]`
 
-Run an agent in a fresh box. The friction guarantee: `cove -- claude` MUST be as
+Run an agent in a fresh box. The friction guarantee: `cove claude` MUST be as
 close to `claude` as possible (same TTY behavior, same argv passthrough, same
-exit code).
+exit code). `cove [flags] -- <agent> [args…]` remains the permanent escape hatch
+when an agent name collides with a public cove command.
 
 - **Flags (before `--`):**
   - `--project DIR` / `-C DIR` — project to mount at `/work`. Default: the
@@ -1428,7 +1429,35 @@ optional filters and `--follow` (tail -f). Rationale for shipping the verb (vs
 has against the oracle problem. ~40 lines. This is the sole exception to the
 "no extra verbs" minimalism, justified by the security argument.
 
-### 6.5 Explicitly absent verbs
+On a terminal it renders a compact protected/allowed/blocked view; `--json` or
+non-terminal output preserves original JSONL bytes for scripts. `--follow`,
+`--session`, `--host`, and block-only filters do not alter those raw bytes.
+
+### 6.5 Policy and diagnostic commands
+
+`cove add`, `cove allow`, `cove remove`, and `cove list` manage named
+connections. `cove config check` validates hand-authored TOML and
+`cove config edit` is its escape hatch. `cove sessions` lists recent sessions;
+`cove explain last` maps the latest stored block to a safe fix. Mutations preview
+their effect and require confirmation (or `--yes` outside a TTY). They edit only
+the versioned COVE MANAGED block and never rewrite an existing configuration at
+setup time.
+
+`[[expose]]` explicitly describes a host path that must enter the box, including
+its mode and reason. It is for non-injectable credentials and retains the
+documented in-box theft and authorized-misuse residual. `[[mtls]]` uses paired
+`rules = [{ method = "GET", path_prefix = "/v1/reports/" }]`; separate method
+and path arrays are rejected so no Cartesian over-grant is possible. Audit is
+enabled by default; `--no-audit` (or config audit disable) produces no audit
+records for that session.
+
+### 6.6 Exit status
+
+Command failures use sysexits: 64 usage, 66 input, 69 unavailable, 73 create,
+74 I/O, 75 temporary, 77 permission, and 78 configuration. A started agent is
+different: its exit code, or `128+signal`, is propagated verbatim.
+
+### 6.7 Explicitly absent verbs
 
 No `ls`, `attach`, `ps`, `stop`, `exec`, session names, or TUI. No
 `build`/`upgrade`/`test`/image management (the old bash `cove` verbs are

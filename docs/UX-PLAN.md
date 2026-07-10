@@ -123,3 +123,23 @@ exit-code drop-in contract; fail-closed honesty and the residual-truth voice; th
 self-describing dummies; JSONL + `--follow` rotation/truncation handling under the hood;
 quiet nvm/volta/asdf auto-resolve; idempotent self-elevating setup. The README's prose
 quality is the bar the CLI *output* is raised to — not the reverse.
+
+## Shipped interface and release contract
+
+The shipped front door is `cove <agent> [args...]`; `cove -- <agent>` remains
+the collision escape hatch. The public commands are `setup`, `status`, `add`,
+`allow`, `remove`, `list`, `log`, `config check`, `config edit`, `sessions`,
+and `explain last`. Terminal log output is a human verdict view; `--json` and
+non-terminal output preserve raw JSONL bytes.
+
+Config commands edit only a versioned COVE MANAGED block. `[[expose]]` makes a
+necessary local credential mount explicit, while `[[inject]]`, `[[sigv4]]`, and
+`[[mtls]]` keep their material host-side. mTLS rules are paired
+`{method,path_prefix}` entries, never a Cartesian product. Audit defaults on;
+an audit-disabled session has no audit records. The sysexits contract remains:
+64 usage, 66 input, 69 unavailable, 73 create, 74 I/O, 75 temporary, 77
+permission, and 78 config (agent exit status remains verbatim).
+
+Releases provide Linux amd64/arm64 archives, SHA-256 `checksums.txt`, SBOMs,
+and deb/rpm packages. Packages install the binary and documentation only:
+setup stays a deliberate per-user command.

@@ -1,0 +1,43 @@
+version: 2
+project_name: cove
+
+builds:
+  - id: cove
+    main: ./cmd/cove
+    binary: cove
+    goos: [linux]
+    goarch: [amd64, arm64]
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+      - -buildvcs=true
+    ldflags:
+      - -s -w -X cove/internal/version.Version={{ .Version }} -X cove/internal/version.Commit={{ .Commit }} -X cove/internal/version.Date={{ .Date }}
+
+archives:
+  - id: cove
+    ids: [cove]
+    formats: [tar.gz]
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+sboms:
+  - artifacts: archive
+
+nfpms:
+  - id: cove
+    package_name: cove
+    ids: [cove]
+    formats: [deb, rpm]
+    bindir: /usr/bin
+    contents:
+      - src: README.md
+        dst: /usr/share/doc/cove/README.md
+      - src: LICENSE
+        dst: /usr/share/doc/cove/LICENSE

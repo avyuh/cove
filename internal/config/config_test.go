@@ -28,9 +28,16 @@ func TestShippedDefaultConfigAndGitHubPATMigrationValidate(t *testing.T) {
 	if _, err := LoadBytes(seed); err != nil {
 		t.Fatalf("shipped default_config.toml did not validate: %v", err)
 	}
+	if !strings.HasPrefix(string(seed), "# cove") || !strings.Contains(string(seed), "[options]\naudit = true") {
+		t.Fatal("shipped default_config.toml no longer has the minimal documented seed shape")
+	}
+	if strings.Contains(string(seed), "[[expose]]") {
+		t.Fatal("shipped default_config.toml must not expose host credentials by default")
+	}
 
-	// The documented migration removes the OAuth allow rules and uncommenting
-	// both examples creates the exact GitHub API + smart-HTTP policy pair.
+	// Keep this compatibility check for a documented GitHub PAT example if a
+	// future seed includes it. The current minimal seed deliberately has no
+	// inactive service templates; those live in the connection catalog.
 	migrated := string(seed)
 	migrated = strings.Replace(migrated, `  "github.com", "api.github.com", "codeload.github.com", "*.githubusercontent.com",`, `  "codeload.github.com", "*.githubusercontent.com",`, 1)
 	for _, line := range []string{

@@ -32,8 +32,8 @@ Three mechanisms:
   (`cove-dummy-do-not-use`); the real key never enters the box, so it cannot be
   stolen there.
 
-Every request gets a JSONL audit record with its verdict: `allow`, `inject`, or
-`deny`.
+When audit is enabled, every request gets a JSONL audit record with its verdict:
+`allow`, `inject`, or `deny`. An audit-disabled session deliberately writes none.
 
 ## Install
 
@@ -86,12 +86,21 @@ absent. Agents installed under `/usr/local/bin` need nothing. Other cases:
 `runtime_mount` in the config. `-v` prints launcher diagnostics; `--no-audit`
 disables audit records for one run (a denial receipt may still be shown after it exits).
 
+## Daily commands
+
+`cove status` checks readiness; `cove add <service>`, `cove allow <host>`, and
+`cove remove <name>` manage named connections; `cove list` shows them. Use
+`cove config check` to validate a hand edit and `cove config edit` as the
+escape hatch. `cove sessions` lists recent contained runs, and
+`cove explain last` explains the latest stored block. Commands that change a
+policy preview it first; a non-interactive change requires `--yes`.
+
 ## Credentials, per tool
 
 | Tool | You do | Real key in the box? |
 |---|---|---|
 | Claude Code | Nothing — a logged-in `claude` works immediately | No. The proxy reads the OAuth token from host `~/.claude/.credentials.json` per request and injects it. If it expires, run `claude` on the host once to re-login. |
-| Codex (ChatGPT login) | Add `cred_mount = ["~/.codex:rw"]` to the config | Yes — the login writes under `~/.codex`, so it must be mounted. Egress is still bounded to `chatgpt.com` / `auth.openai.com`. |
+| Codex (ChatGPT login) | `cove add codex-login` | Yes — the login writes under `~/.codex`, so it must be explicitly exposed read-write. Egress is still bounded to `chatgpt.com` / `auth.openai.com`. |
 | OpenAI API | Key into `~/.config/cove/secrets/openai-api-key` | No — injected |
 | Kimi | `~/.config/cove/secrets/kimi-api-key` | No — injected |
 | Gemini (API key) | `~/.config/cove/secrets/gemini-api-key` | No — injected |
@@ -108,7 +117,7 @@ are different: every required secret is host-side and missing material fails
 closed with HTTP 502; cove never falls back to a tunnel or forwards a dummy.
 
 For GitHub, choose one mode. The default is `gh` OAuth: GitHub hosts remain
-`allow` rules and `gh` needs `cred_mount = ["~/.config/gh"]`, so that session is
+`allow` rules and `cove add github --oauth` exposes `~/.config/gh` read-only, so that session is
 in the box. PAT mode is different: enable the two commented GitHub `[[inject]]`
 stanzas in the seed, remove both `github.com` and `api.github.com` from `allow`,
 and store a fine-grained PAT in the referenced host file. This gives `gh` API
@@ -150,19 +159,43 @@ preserved byte-for-byte.
   `json:~/.claude/.credentials.json#claudeAiOauth.accessToken`), `dummy_env`
   for the placeholder the agent sees, and `base_url_env` to point the client at
   the proxy.
-- `cred_mount = ["~/.codex:rw", ...]` — host dirs mounted into the box HOME for
-  logins that cannot be injected. Read-only unless `:rw`; `:rw` lets the tool
-  refresh its own token but is unsafe under concurrent sessions on the same
-  dir.
 - `runtime_mount` — extra toolchain dirs, read-only, same path as on the host.
 - `env_passthrough` — env vars copied into the box for opaque `allow` hosts.
   Do not pass real `AWS_*` credentials when using a `[[sigv4]]` rule: cove
   supplies dummy AWS credentials and re-signs its supported S3 subset
   host-side. Unsupported AWS services or SigV4 modes remain `allow` +
   short-lived credentials in the box.
+- `[[expose]]` — the explicit replacement for a credential mount: each entry
+  names a host path, read-only or read-write mode, and why it must enter the
+  box. This is for credentials that cannot be injected; it is deliberately not
+  the default and remains exfiltration-contained rather than secret.
 
 A host must have exactly one policy kind: `allow`, `[[inject]]`, `[[sigv4]]`,
 or `[[mtls]]`; cove validates conflicts at startup.
+
+For mTLS, every authorization is an explicit method/path pair, for example
+`rules = [{ method = "GET", path_prefix = "/v1/reports/" }]`; it never combines
+separate method and path lists. Audit is enabled by default and can be disabled
+for a run with `--no-audit` (or in config); when disabled, that session writes
+no audit records.
+
+Managed connections live only between `BEGIN COVE MANAGED` and `END COVE
+MANAGED` markers. cove preserves every byte outside that block and never
+rewrites an existing user configuration during setup.
+
+Command failures use the following sysexits values; once an agent has started,
+its own exit code (or `128+signal`) is preserved instead.
+
+| Code | Meaning |
+|---:|---|
+| 64 | usage |
+| 66 | input |
+| 69 | unavailable |
+| 73 | create |
+| 74 | I/O |
+| 75 | temporary failure |
+| 77 | permission |
+| 78 | configuration |
 
 > **Capability — S3 SigV4 re-signing (v1):** aws/boto3/s5cmd may hold dummy AWS credentials; cove re-signs supported, finite S3 requests with a host-side key after enforcing configured account label, region, service, method, operation, and resource. **Residual — policy-constrained signing oracle:** a subverted agent can perform every operation the cove policy and AWS IAM both allow. The real key stays out of the box, but cove is not misuse-proof. Presigned URLs, SigV4a, multipart, and AWS streaming/chunk signatures fail closed.
 
@@ -181,7 +214,7 @@ these residuals are real:
   still spend your API quota; one with your `gh` login can still push to your
   own repos. Injection cannot distinguish a legitimate request from a malicious
   one at the same host. `cove log` is the only mitigation.
-- **Mounted credentials are readable.** A `cred_mount`ed session file (Codex,
+- **Exposed credentials are readable.** A `[[expose]]`d session file (Codex,
   `gh`) is in the box by necessity: exfil-contained by the allow list, but not
   hidden from the agent.
 - **Kernel escape.** The box is namespaces, not a hypervisor or gVisor. A
