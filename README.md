@@ -131,7 +131,7 @@ choosing credential lifetime and scope.
 ## Reading the audit trail
 
 ```sh
-cove log                          # every request: allow / inject / deny
+cove log                          # stored requests: allow / inject / deny
 cove log --follow --deny-only     # watch denials live
 cove log --session 1a2b3c4d --host api.anthropic.com
 ```
@@ -207,7 +207,8 @@ its own exit code (or `128+signal`) is preserved instead.
 
 cove stops credential **theft** (Class-A keys are never in the box; host
 dotfiles are absent) and **exfiltration** (the only egress is to hosts you
-listed). It runs *contained agent sessions* — it is not a secure sandbox, and
+listed). It runs *contained agent sessions* — it is not a hardened isolation
+boundary, and
 these residuals are real:
 
 - **Misuse at an allowed host.** An agent with the injected Anthropic key can

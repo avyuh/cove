@@ -873,8 +873,9 @@ riskiest implementation detail. Specification:
   is tagged with that session's `(id, agent)` by the proxy. These fields are
   therefore **trustworthy** — the in-box adversary cannot forge them. (There is
   no in-box preamble.) They correlate all requests of one `cove -- claude` run.
-- **Purpose:** the audit log is the *only* mitigation for the misuse/oracle
-  residual (§8). It is nearly free and MUST be enabled by default.
+- **Purpose:** when enabled, the audit log is the detection control for the
+  misuse/oracle residual (§8). It is nearly free and MUST be enabled by default;
+  an explicitly audit-disabled session writes no records.
 
 ### 4.10 Proxy lifecycle
 
@@ -1604,8 +1605,10 @@ host user. (Proven by the foundational spike.)
 3. **Class-A keys never enter the box.** The proxy injects them host-side; the
    box holds only a dummy. A compromised agent cannot read or exfiltrate the
    real Anthropic/Hetzner/GitHub-PAT/etc. key.
-4. **Full auditability of policy-relevant egress.** Every CONNECT (allowed,
-   injected, denied) is logged; injected requests log method+path+status.
+4. **Auditability of policy-relevant egress when audit is enabled.** Every
+   CONNECT (allowed, injected, denied) in an audited session is logged;
+   injected requests log method+path+status. An explicitly audit-disabled
+   session writes no records.
 
 ### 8.2 What cove explicitly does NOT guarantee
 
@@ -1647,7 +1650,8 @@ host user. (Proven by the foundational spike.)
   patched; accept the residual (documented, deliberate).*
 - **h2 MITM correctness bug:** a subtle streaming/framing bug could corrupt or
   stall injected traffic. *Mitigation: use stdlib ReverseProxy (no hand-rolled
-  framing); prove M4 first; per-host ALPN downgrade / allow-fallback.*
+  framing), test both supported ALPN paths, and fail closed; never fall back to
+  an opaque allow.*
 - **Compromised proxy / CA key theft:** the CA private key on the host is a
   high-value target; if stolen, an attacker can MITM the user's own inject hosts
   from that host. *Mitigation: 0600 key, host-only, never in a box; it is no
@@ -1655,11 +1659,12 @@ host user. (Proven by the foundational spike.)
 
 ### 8.4 The audit log as the mitigation
 
-The audit log is the *only* control cove offers against the misuse/oracle
-residual. It is append-only and records method+path+status for injected hosts.
-`cove log` makes it one command away. This is an honest "detect, not prevent"
-posture for misuse — the prevention story is scoped/short-lived credentials,
-which is the user's responsibility.
+When enabled, the audit log is cove's detection control against the
+misuse/oracle residual. It is append-only and records method+path+status for
+injected hosts. `cove log` makes it one command away. This is an honest
+"detect, not prevent" posture for misuse — the prevention story is
+scoped/short-lived credentials, which is the user's responsibility. A user who
+explicitly disables audit also disables this detection control for that session.
 
 **Integrity of the audit fields (M6):** `session` and `agent` are fixed
 **host-side** at registration on a per-session socket (§4.1); the in-box
